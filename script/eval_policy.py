@@ -330,7 +330,8 @@ def eval_policy(task_name,
                 succ = True
                 break
         # task_total_reward += TASK_ENV.episode_score
-        TASK_ENV._del_eval_video_ffmpeg()
+        if TASK_ENV.eval_video_path is not None:
+            TASK_ENV._del_eval_video_ffmpeg()
 
         if succ:
             TASK_ENV.suc += 1
