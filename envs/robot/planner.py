@@ -2,6 +2,7 @@ import mplib.planner
 import mplib
 import numpy as np
 import pdb
+import traceback
 import numpy as np
 import toppra as ta
 from mplib.sapien_utils import SapienPlanner, SapienPlanningWorld
@@ -403,4 +404,6 @@ try:
             return result_p, result_q
 
 except Exception as e:
-    print("[Planner.py]: Curobo not installed!")
+    print('[planner.py]: Something wrong happened when importing CuroboPlanner! Please check if Curobo is installed correctly. If the problem still exists, you can install Curobo from https://github.com/NVlabs/curobo manually.')
+    print('Exception traceback:')
+    traceback.print_exc()
