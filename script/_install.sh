@@ -54,6 +54,9 @@ cd curobo
 pip install -e . --no-build-isolation
 cd ../..
 
+echo "Configuring Path ..."
+./script/.update_path.sh > /dev/null 2>&1
+
 echo "Installation basic environment complete!"
 echo -e "You need to:"
 echo -e "    1. \033[34m\033[1m(Important!)\033[0m Download asserts from huggingface."
