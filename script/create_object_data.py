@@ -178,7 +178,6 @@ class GLBViewer(BaseViewer):
 
     def __init__(self):
         super().__init__()
-        self.init_parser()
 
     def main(self, pose, modelname, modelid, inherit_config: dict = None):
         global render_pause
@@ -221,6 +220,8 @@ class GLBViewer(BaseViewer):
         if self.config_path.exists():
             try:
                 actor_config = json.load(open(self.config_path, "r", encoding="utf-8"))
+                if len(actor_config['orientation_point']) > 1:
+                    actor_config['orientation_point'] = [actor_config['orientation_point']]
             except json.JSONDecodeError:
                 logging.warning(f"Invalid JSON in {self.config_path}, using empty config.")
                 actor_config = None
