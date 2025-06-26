@@ -108,14 +108,11 @@ If you find our work useful, please consider citing:
 
 <b>RoboTwin 2.0</b>: A Scalable Data Generator and Benchmark with Strong Domain Randomization for Robust Bimanual Robotic Manipulation
 ```
-@misc{chen2025robotwin20scalabledata,
-      title={RoboTwin 2.0: A Scalable Data Generator and Benchmark with Strong Domain Randomization for Robust Bimanual Robotic Manipulation}, 
-      author={Tianxing Chen and Zanxin Chen and Baijun Chen and Zijian Cai and Yibin Liu and Qiwei Liang and Zixuan Li and Xianliang Lin and Yiheng Ge and Zhenyu Gu and Weiliang Deng and Yubin Guo and Tian Nian and Xuanbing Xie and Qiangyu Chen and Kailun Su and Tianling Xu and Guodong Liu and Mengkang Hu and Huan-ang Gao and Kaixuan Wang and Zhixuan Liang and Yusen Qin and Xiaokang Yang and Ping Luo and Yao Mu},
-      year={2025},
-      eprint={2506.18088},
-      archivePrefix={arXiv},
-      primaryClass={cs.RO},
-      url={https://arxiv.org/abs/2506.18088}, 
+@article{chen2025robotwin,
+  title={RoboTwin 2.0: A Scalable Data Generator and Benchmark with Strong Domain Randomization for Robust Bimanual Robotic Manipulation},
+  author={Chen, Tianxing and Chen, Zanxin and Chen, Baijun and Cai, Zijian and Liu, Yibin and Liang, Qiwei and Li, Zixuan and Lin, Xianliang and Ge, Yiheng and Gu, Zhenyu and others},
+  journal={arXiv preprint arXiv:2506.18088},
+  year={2025}
 }
 ```
 
