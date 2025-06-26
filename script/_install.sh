@@ -55,7 +55,7 @@ pip install -e . --no-build-isolation
 cd ../..
 
 echo "Configuring Path ..."
-./script/.update_path.sh > /dev/null 2>&1
+./script/.update_path.sh
 
 echo "Installation basic environment complete!"
 echo -e "You need to:"
