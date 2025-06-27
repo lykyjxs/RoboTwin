@@ -55,7 +55,7 @@ pip install -e . --no-build-isolation
 cd ../..
 
 echo "Configuring Path ..."
-./script/.update_path.sh
+python ./script/update_embodiment_config_path.py
 
 echo "Installation basic environment complete!"
 echo -e "You need to:"
