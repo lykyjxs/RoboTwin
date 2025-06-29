@@ -431,19 +431,19 @@ class Camera:
             res["right_camera"] = {}
             res["left_camera"]["depth"] = _get_depth(self.left_camera)
             res["right_camera"]["depth"] = _get_depth(self.right_camera)
-            res["left_camera"]["depth"][rgba["left_camera"]["rgba"][:, :, 3] == 0] = -0.0
-            res["right_camera"]["depth"][rgba["right_camera"]["rgba"][:, :, 3] == 0] = -0.0
+            res["left_camera"]["depth"] *= rgba["left_camera"]["rgba"][:, :, 3] / 255
+            res["right_camera"]["depth"] *= rgba["right_camera"]["rgba"][:, :, 3] / 255
         
         for camera, camera_name in zip(self.static_camera_list, self.static_camera_name):
             if camera_name == "head_camera":
                 if self.collect_head_camera:
                     res[camera_name] = {}
                     res[camera_name]["depth"] = _get_depth(camera)
-                    res[camera_name]["depth"][rgba[camera_name]["rgba"][:, :, 3] == 0] = -0.0
+                    res[camera_name]["depth"] *= rgba[camera_name]["rgba"][:, :, 3] / 255
             else:
                 res[camera_name] = {}
                 res[camera_name]["depth"] = _get_depth(camera)
-                res[camera_name]["depth"][rgba[camera_name]["rgba"][:, :, 3] == 0] = -0.0
+                res[camera_name]["depth"] *= rgba[camera_name]["rgba"][:, :, 3] / 255
         # res['head_sensor']['depth'] = _get_sensor_depth(self.head_sensor)
 
         return res
