@@ -225,18 +225,18 @@ def eval_policy(task_name,
                 episode_info = TASK_ENV.play_once()
                 TASK_ENV.close_env()
             except UnStableError as e:
-                print(" -------------")
-                print("Error: ", e)
-                print(" -------------")
+                # print(" -------------")
+                # print("Error: ", e)
+                # print(" -------------")
                 TASK_ENV.close_env()
                 now_seed += 1
                 args["render_freq"] = render_freq
                 continue
             except Exception as e:
-                stack_trace = traceback.format_exc()
-                print(" -------------")
-                print("Error: ", stack_trace)
-                print(" -------------")
+                # stack_trace = traceback.format_exc()
+                # print(" -------------")
+                # print("Error: ", e)
+                # print(" -------------")
                 TASK_ENV.close_env()
                 now_seed += 1
                 args["render_freq"] = render_freq
