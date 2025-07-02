@@ -38,6 +38,7 @@ Accepted to <i style="color: red; display: inline;"><b>ECCV Workshop 2024 (Best 
 
 
 # 🐣 Update
+* **2025/07/02**, Fix Piper Wrist Bug [[issue](https://github.com/RoboTwin-Platform/RoboTwin/issues/104)]. Please redownload the embodiment asset.
 * **2025/07/01**, We release Technical Report of RoboTwin Dual-Arm Collaboration Challenge @ CVPR 2025 MEIS Workshop [[arXiv](https://arxiv.org/abs/2506.23351)] !
 * **2025/06/21**, We release RoboTwin 2.0 [[Webpage](https://robotwin-platform.github.io/)] !
 * **2025/04/11**, RoboTwin is seclected as <i>CVPR Highlight paper</i>!
