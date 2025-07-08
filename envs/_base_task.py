@@ -471,23 +471,6 @@ class Base_Task(gym.Env):
                 pkl_dic["observation"][camera_name].update(depth[camera_name])
         # endpose
         if self.data_type.get("endpose", False):
-
-            def trans_endpose_quat2rpy(endpose, gripper_val):
-                rpy = t3d.euler.quat2euler(endpose[-4:])
-                roll, pitch, yaw = rpy
-                x, y, z = endpose[:3]
-                endpose = {
-                    "gripper": float(gripper_val),
-                    "pitch": float(pitch),
-                    "roll": float(roll),
-                    "x": float(x),
-                    "y": float(y),
-                    "yaw": float(yaw),
-                    "z": float(z),
-                }
-                return endpose
-
-            # TODO
             norm_gripper_val = [
                 self.robot.get_left_gripper_val(),
                 self.robot.get_right_gripper_val(),
@@ -498,25 +481,6 @@ class Base_Task(gym.Env):
             pkl_dic["endpose"]["left_gripper"] = norm_gripper_val[0]
             pkl_dic["endpose"]["right_endpose"] = right_endpose
             pkl_dic["endpose"]["right_gripper"] = norm_gripper_val[1]
-            # left_endpose = trans_endpose_quat2rpy(self.robot.get_left_tcp_pose(), norm_gripper_val[0])
-            # right_endpose = trans_endpose_quat2rpy(self.robot.get_right_tcp_pose(), norm_gripper_val[1])
-
-            # pkl_dic["endpose"] = np.array([
-            #     left_endpose["x"],
-            #     left_endpose["y"],
-            #     left_endpose["z"],
-            #     left_endpose["roll"],
-            #     left_endpose["pitch"],
-            #     left_endpose["yaw"],
-            #     left_endpose["gripper"],
-            #     right_endpose["x"],
-            #     right_endpose["y"],
-            #     right_endpose["z"],
-            #     right_endpose["roll"],
-            #     right_endpose["pitch"],
-            #     right_endpose["yaw"],
-            #     right_endpose["gripper"],
-            # ])
         # qpos
         if self.data_type.get("qpos", False):
 
