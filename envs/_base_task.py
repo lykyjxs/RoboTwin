@@ -1076,6 +1076,8 @@ class Base_Task(gym.Env):
             return [-1, -1, -1, -1, -1, -1, -1]
 
         contact_matrix = actor.get_contact_point(contact_point_id, "matrix")
+        if contact_matrix is None:
+            return None
         global_contact_pose_matrix = contact_matrix @ np.array([[0, 0, 1, 0], [-1, 0, 0, 0], [0, -1, 0, 0],
                                                                 [0, 0, 0, 1]])
         global_contact_pose_matrix_q = global_contact_pose_matrix[:3, :3]
