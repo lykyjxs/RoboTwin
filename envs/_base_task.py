@@ -1556,7 +1556,7 @@ class Base_Task(gym.Env):
             if left_result["status"] != "Success":
                 left_n_step = 50
                 topp_left_flag = False
-                print("left fail")
+                # print("left fail")
             else: 
                 left_n_step = left_result["position"].shape[0]
                 topp_left_flag = True
@@ -1564,7 +1564,7 @@ class Base_Task(gym.Env):
             if right_result["status"] != "Success":
                 right_n_step = 50
                 topp_right_flag = False
-                print("right fail")
+                # print("right fail")
             else:
                 right_n_step = right_result["position"].shape[0]
                 topp_right_flag = True
