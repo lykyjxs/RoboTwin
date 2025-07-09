@@ -1456,7 +1456,7 @@ class Base_Task(gym.Env):
         return True  # TODO: maybe need try error
 
     def take_action(self, action, action_type='qpos'):  # action_type: qpos or ee
-        if self.take_action_cnt == self.step_lim:
+        if self.take_action_cnt == self.step_lim or self.eval_success:
             return
 
         eval_video_freq = 1  # fixed
