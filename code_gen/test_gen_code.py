@@ -105,6 +105,7 @@ def class_decorator_env(task_name):
         object: Instance of the task class.
     """
     envs_module = importlib.import_module(f"envs.{task_name}")
+    importlib.reload(envs_module)
     try:
         env_class = getattr(envs_module, task_name)
         return env_class()
