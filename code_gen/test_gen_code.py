@@ -87,6 +87,7 @@ def class_decorator_gen(task_name):
         object: Instance of the task class.
     """
     envs_module = importlib.import_module(f"envs_gen.gpt_{task_name}")
+    importlib.reload(envs_module)
     try:
         env_class = getattr(envs_module, f"gpt_{task_name}")
         return env_class()
