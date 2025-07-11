@@ -54,7 +54,9 @@ def enrich_actors(actor_list):
                     if "contact_points" in points_info:
                         contact_points = points_info["contact_points"]
                         valid_contact_points = any(
-                            point.get("id") and len(point.get("id", [])) > 0 for point in contact_points
+                            point.get("id") is not None and (
+                                not isinstance(point.get("id"), list) or len(point.get("id")) > 0
+                            ) for point in contact_points
                         )
                         enriched_actor["contact_points"] = contact_points if valid_contact_points else None
                     else:
