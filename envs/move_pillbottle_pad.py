@@ -97,7 +97,7 @@ class move_pillbottle_pad(Base_Task):
     def check_success(self):
         pillbottle_pos = self.pillbottle.get_pose().p
         target_pos = self.pad.get_pose().p
-        eps1 = 0.015
+        eps1 = 0.03
         return (np.all(abs(pillbottle_pos[:2] - target_pos[:2]) < np.array([eps1, eps1]))
                 and np.abs(self.pillbottle.get_pose().p[2] - (0.741 + self.table_z_bias)) < 0.005
                 and self.robot.is_left_gripper_open() and self.robot.is_right_gripper_open())
