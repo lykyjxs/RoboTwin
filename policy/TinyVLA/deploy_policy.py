@@ -150,7 +150,7 @@ def eval(TASK_ENV, model, observation):
     """
     obs = encode_obs(observation)  # Post-Process Observation
     # instruction = task_prompt[model.task_name]
-    instruction = "Pick up the two bottles."
+    instruction = TASK_ENV.get_instruction()
     obs.update({"raw_lang": str(instruction)})
     # print("******************************")
     actions = model.get_action(obs)  # Get Action according to observation chunk
