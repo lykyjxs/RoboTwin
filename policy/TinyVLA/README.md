@@ -12,10 +12,23 @@ pip install -e .
 ```
 Evaluation Environment:
 
-If you already have RoboTwin 2.0 installed, activate its conda environment and add the evaluation dependencies:
+Follow the RoboTwin 2.0 documentation to set up the RoboTwin environment. Once the environment is activated, run the following commands to install the required packages:
 ```bash
-conda activate your_RoboTwin_env
-pip install -r Eval_Tiny_DexVLA_requirements.txt 
+pip install einops==0.8.1
+pip install transformers==4.47.0
+pip install timm==1.0.16
+pip install diffusers==0.34.0
+pip install qwen-vl-utils==0.0.11
+pip install accelerate==0.26.0
+```
+If you encounter the following error:
+```bash
+Unrecognized option 'crf'. 
+Error splitting the argument list: Option not found.
+```
+Run the following command to install the required version of ffmpeg:
+```bash
+conda install -c conda-forge ffmpeg
 ```
 ## Prepare Training Data
 This step performs data preprocessing, converting the original RoboTwin 2.0 data into the format required for TinyVLA training. The `expert_data_num` parameter specifies the number of trajectory pairs to be used as training data.
