@@ -309,7 +309,10 @@ class TrainDP3Workspace:
 
         cfg = copy.deepcopy(self.cfg)
 
-        env_runner = RobotRunner(None)
+        n_obs_steps = cfg['n_obs_steps']
+        n_action_steps = cfg['n_action_steps']
+
+        env_runner = RobotRunner(n_obs_steps=n_obs_steps, n_action_steps=n_action_steps)
 
         if not cfg.policy.use_pc_color:
             ckpt_file = pathlib.Path(
