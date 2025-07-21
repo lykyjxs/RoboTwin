@@ -142,7 +142,10 @@ class place_object_basket(Base_Task):
         toy_p = self.object.get_pose().p
         basket_p = self.basket.get_pose().p
         basket_axis = (self.basket.get_pose().to_transformation_matrix()[:3, :3] @ np.array([[0, 1, 0]]).T)
+        obj_contact_table = not self.check_actors_contact(self.object_name, "table")
+        obj_contact_basket = self.check_actors_contact(self.object_name, self.basket_name)
         return (basket_p[2] - self.start_height > 0.02 and \
                 toy_p[2] - self.object_start_height > 0.02 and \
                 np.dot(basket_axis.reshape(3), [0, 0, 1]) > 0.5 and \
-                np.sum(np.sqrt((toy_p - basket_p)**2)) < 0.15)
+                np.sum(np.sqrt((toy_p - basket_p)**2)) < 0.15 and \
+                obj_contact_table and obj_contact_basket)

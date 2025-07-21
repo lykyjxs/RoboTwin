@@ -101,7 +101,7 @@ class handover_mic(Base_Task):
         contact = self.get_gripper_actor_contact_position("018_microphone")
         if len(contact) == 0:
             return False
-        close_gripper_func = self.is_left_gripper_close if self.grasp_arm_tag == "left" else self.is_right_gripper_close
-        open_gripper_func = self.is_left_gripper_open if self.handover_arm_tag == "left" else self.is_right_gripper_open
+        close_gripper_func = self.is_left_gripper_close if self.handover_arm_tag == "left" else self.is_right_gripper_close
+        open_gripper_func = self.is_left_gripper_open if self.grasp_arm_tag == "left" else self.is_right_gripper_open
         tag = microphone_pose[0] < 0 if self.handover_arm_tag == "left" else microphone_pose[0] > 0
         return (close_gripper_func() and open_gripper_func() and microphone_pose[2] > 0.92 and tag)
