@@ -1182,7 +1182,7 @@ class Base_Task(gym.Env):
             target_dis=grasp_dis,
             contact_point_id=contact_point_id,
         )
-        if pre_grasp_pose == grasp_dis:
+        if pre_grasp_pose == grasp_pose:
             return arm_tag, [
                 Action(arm_tag, "move", target_pose=pre_grasp_pose),
                 Action(arm_tag, "close", target_gripper_pos=gripper_pos),
