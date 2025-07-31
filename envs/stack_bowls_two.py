@@ -13,7 +13,7 @@ class stack_bowls_two(Base_Task):
         bowl_pose_lst = []
         for i in range(2):
             bowl_pose = rand_pose(
-                xlim=[-0.28, 0.28],
+                xlim=[-0.3, 0.3],
                 ylim=[-0.15, 0.15],
                 qpos=[0.5, 0.5, 0.5, 0.5],
                 ylim_prop=True,
@@ -26,10 +26,10 @@ class stack_bowls_two(Base_Task):
                         return False
                 return True
 
-            while (abs(bowl_pose.p[0]) < 0.08 or np.sum(pow(bowl_pose.p[:2] - np.array([0, -0.1]), 2)) < 0.0169
+            while (abs(bowl_pose.p[0]) < 0.09 or np.sum(pow(bowl_pose.p[:2] - np.array([0, -0.1]), 2)) < 0.0169
                    or not check_bowl_pose(bowl_pose)):
                 bowl_pose = rand_pose(
-                    xlim=[-0.28, 0.28],
+                    xlim=[-0.3, 0.3],
                     ylim=[-0.15, 0.15],
                     qpos=[0.5, 0.5, 0.5, 0.5],
                     ylim_prop=True,
@@ -37,23 +37,19 @@ class stack_bowls_two(Base_Task):
                 )
             bowl_pose_lst.append(deepcopy(bowl_pose))
 
-        def create_bowl(bowl_pose, model_id):
-            return create_actor(
-                self,
-                pose=bowl_pose,
-                modelname="002_bowl",
-                model_id=model_id,
-                convex=True,
-            )
+        bowl_pose_lst = sorted(bowl_pose_lst, key=lambda x: x.p[1])
 
-        self.bowl1 = create_bowl(bowl_pose_lst[0], 6)
-        self.bowl2 = create_bowl(bowl_pose_lst[1], 7)
+        def create_bowl(bowl_pose):
+            return create_actor(self, pose=bowl_pose, modelname="002_bowl", model_id=3, convex=True)
+
+        self.bowl1 = create_bowl(bowl_pose_lst[0])
+        self.bowl2 = create_bowl(bowl_pose_lst[1])
 
         self.add_prohibit_area(self.bowl1, padding=0.07)
         self.add_prohibit_area(self.bowl2, padding=0.07)
         target_pose = [-0.1, -0.15, 0.1, -0.05]
         self.prohibited_area.append(target_pose)
-        self.bowl1_target_pose = np.array([0, -0.1, 0.75])
+        self.bowl1_target_pose = np.array([0, -0.1, 0.76])
         self.quat_of_target_pose =  [0, 0.707, 0.707, 0]
 
     def move_bowl(self, actor, target_pose):
@@ -65,7 +61,7 @@ class stack_bowls_two(Base_Task):
                 self.grasp_actor(
                     actor,
                     arm_tag=arm_tag,
-                    contact_point_id=[2, 0][int(arm_tag == "left")],
+                    contact_point_id=[0, 2][int(arm_tag == "left")],
                     pre_grasp_dis=0.1,
                 ))
         else:
@@ -73,7 +69,7 @@ class stack_bowls_two(Base_Task):
                 self.grasp_actor(
                     actor,
                     arm_tag=arm_tag,
-                    contact_point_id=[2, 0][int(arm_tag == "left")],
+                    contact_point_id=[0, 2][int(arm_tag == "left")],
                     pre_grasp_dis=0.1,
                 ),  # arm_tag
                 self.back_to_origin(arm_tag=arm_tag.opposite),  # arm_tag.opposite
@@ -94,17 +90,18 @@ class stack_bowls_two(Base_Task):
         return arm_tag
 
     def play_once(self):
-        # Initialize last arm used as None
+        # Initialize last arm used to None
         self.las_arm = None
-        # Move bowl1 to position [0, -0.1, 0.75] and get the arm tag used
+
+        # Move bowl1 to position [0, -0.1, 0.76]
         arm_tag1 = self.move_bowl(self.bowl1, self.bowl1_target_pose)
-        # Move bowl2 to a position slightly above bowl1 and get the arm tag used
+        # Move bowl2 to be 0.05m above bowl1's position
         arm_tag2 = self.move_bowl(self.bowl2, self.bowl1.get_pose().p + [0, 0, 0.05])
 
         # Store information about the bowls and arms used in the info dictionary
         self.info["info"] = {
-            "{A}": f"002_bowl/base6",
-            "{B}": f"002_bowl/base7",
+            "{A}": f"002_bowl/base3",
+            "{B}": f"002_bowl/base3",
             "{a}": str(arm_tag1),
             "{b}": str(arm_tag2),
         }
@@ -114,7 +111,10 @@ class stack_bowls_two(Base_Task):
         bowl1_pose = self.bowl1.get_pose().p
         bowl2_pose = self.bowl2.get_pose().p
         bowl1_pose, bowl2_pose = sorted([bowl1_pose, bowl2_pose], key=lambda x: x[2])
-        target_height = [0.74 + self.table_z_bias, 0.774 + self.table_z_bias]
+        target_height = [
+            0.74 + self.table_z_bias,
+            0.77 + self.table_z_bias,
+        ]
         eps = 0.02
         eps2 = 0.04
         return (np.all(abs(bowl1_pose[:2] - bowl2_pose[:2]) < eps2)
