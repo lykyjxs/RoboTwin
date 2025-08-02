@@ -64,6 +64,15 @@
     "Grab {B} and drop it into {A}.",
     "Grab {B} with one arm, place in {A}.",
     "Pick {B} and drop it in {A}",
-    "Place {B} into {A} using {a}"
+    "Place {B} into {A} using {a}",
+    "Grab {B} and {C} and drop them into {A}.",
+    "Use {a} to pick up {B} and {C}, then place them in {A}.",
+    "Grab {B} and {C} and put them in {A}.",
+    "Use {a} to pick {B} and {C} and place in {A}.",
+    "Pick {B} and {C} and place them in {A}.",
+    "Use one arm to grab {B} and {C}, drop in {A}.",
+    "Grab {B} and {C} and drop it into {A}.",
+    "Grab {B} and {C} with two arms, place in {A}.",
+    "Place {B} and {C} into {A} using {a}"
   ]
 }

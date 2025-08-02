@@ -190,6 +190,7 @@ def save_episode_descriptions(task_name: str, setting: str, generated_descriptio
 
 
 def generate_episode_descriptions(task_name: str, episodes: List[Dict[str, str]], max_descriptions: int = 1000000):
+    print(max_descriptions)
     """
     Generate descriptions for episodes by replacing placeholders in instructions with parameter values.
     For each episode, filter instructions that have matching placeholders and generate up to
@@ -218,6 +219,7 @@ def generate_episode_descriptions(task_name: str, episodes: List[Dict[str, str]]
         seen_episode_descriptions = []
         flag_seen = True
         while (len(seen_episode_descriptions) < max_descriptions and flag_seen and filtered_seen_instructions):
+            
             for instruction in filtered_seen_instructions:
                 if len(seen_episode_descriptions) >= max_descriptions:
                     flag_seen = False
