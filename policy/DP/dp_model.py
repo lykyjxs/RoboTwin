@@ -15,7 +15,7 @@ class DP:
 
     def __init__(self, ckpt_file: str, n_obs_steps, n_action_steps):
         self.policy = self.get_policy(ckpt_file, None, "cuda:0")
-        self.runner = DPRunner(n_obs_steps=n_obs_steps, n_action_steps=n_obs_steps)
+        self.runner = DPRunner(n_obs_steps=n_obs_steps, n_action_steps=n_action_steps)
 
     def update_obs(self, observation):
         self.runner.update_obs(observation)
