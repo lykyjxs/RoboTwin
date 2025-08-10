@@ -18,7 +18,7 @@ from pathlib import Path
 import sys, os
 # get current workspace
 current_file = Path(__file__)
-sys.path.append(current_file.parent.parent)
+sys.path.append(str(current_file.parent.parent))
 
 from rdt.blocks import (FinalLayer, RDTBlock, TimestepEmbedder, get_1d_sincos_pos_embed_from_grid,
                         get_multimodal_cond_pos_embed)

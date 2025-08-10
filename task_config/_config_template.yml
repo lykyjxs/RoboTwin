@@ -23,7 +23,7 @@ data_type:
   third_view: false
   depth: false
   pointcloud: false
-  endpose: false
+  endpose: true
   qpos: true
   mesh_segmentation: false
   actor_segmentation: false

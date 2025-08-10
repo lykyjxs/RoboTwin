@@ -21,5 +21,6 @@ python script/eval_policy.py --config policy/$policy_name/deploy_policy.yml \
     --task_config ${task_config} \
     --train_config_name ${train_config_name} \
     --model_name ${model_name} \
+    --ckpt_setting ${model_name} \
     --seed ${seed} \
     --policy_name ${policy_name} 
