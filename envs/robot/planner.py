@@ -282,7 +282,6 @@ try:
                 )
                 plan_config.pose_cost_metric = pose_cost_metric
 
-            self.motion_gen.reset(reset_seed=True)  # 运行的代码
             result = self.motion_gen.plan_single(start_joint_states, goal_pose_of_ee, plan_config)
 
             # output
@@ -352,7 +351,6 @@ try:
                 )
                 plan_config.pose_cost_metric = pose_cost_metric
 
-            self.motion_gen.reset(reset_seed=True)
             try:
                 result = self.motion_gen_batch.plan_batch(start_joint_states, goal_pose_of_ee, plan_config)
             except Exception as e:
