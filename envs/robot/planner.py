@@ -182,6 +182,8 @@ try:
     from curobo.util import logger
     import torch
     import yaml
+    from curobo.util import logger
+    logger.setup_logger(level="error", logger_name="curobo")
 
     class CuroboPlanner:
 
