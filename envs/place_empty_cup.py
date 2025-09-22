@@ -44,6 +44,7 @@ class place_empty_cup(Base_Task):
             modelname="019_coaster",
             convex=True,
             model_id=0,
+            is_static=True
         )
 
         self.add_prohibit_area(self.cup, padding=0.05)
