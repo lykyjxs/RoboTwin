@@ -39,7 +39,7 @@ class place_empty_cup(Base_Task):
                 qpos=[0.5, 0.5, 0.5, 0.5],
             )
         self.coaster = create_actor(
-            self.scene,
+            self,
             pose=coaster_pose,
             modelname="019_coaster",
             convex=True,
