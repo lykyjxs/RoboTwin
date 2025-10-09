@@ -151,10 +151,13 @@ The evaluation results, including videos and metrics, will be saved in the `eval
 
 Following the setup in [RoboTwin2.0 Benchmark](https://robotwin-platform.github.io/leaderboard), we report the performance of GO-1 Air model and other baselines in the table below. All models are trained on the Aloha-AgileX embodiment using 50 `demo_clean` demonstrations for 3 selected tasks (`grab_roller`, `handover_mic`, `lift_pot`), and evaluated 100 times under the `demo_clean (Easy)` and `demo_randomized (Hard)` settings. Our models are fine-tuned for 10k steps.
 
+| Policy \ Task | Grab Roller |         | Lift Pot |         | Average    |
+| ------------- | ----------- | ------- | -------- | ------- | ---------- |
+|               | Easy        | Hard    | Easy     | Hard    |            |
+| DP            | 98%         | 0%      | 39%      | 0%      | 34.25%     |
+| ACT           | 94%         | 25%     | 88%      | 0%      | 51.25%     |
+| RDT           | 74%         | 43%     | 72%      | 9%      | 49.5%      |
+| Pi0           | **96%**     | 80%     | 84%      | **36%** | 74%        |
+| GO-1 Air      | 86%         | 94%     | **94%**  | 33%     | 76.75%     |
+| GO-1          | **96%**     | **96%** | **94%**  | 35%     | **80.25%** |
 
-| Task         | GO-1 Air |         | RDT  |      | Pi0  |      | ACT  |      | DP   |      | DP3  |      |
-| ------------ | -------- | ------- | ---- | ---- | ---- | ---- | ---- | ---- | ---- | ---- | ---- | ---- |
-|              | Easy     | Hard    | Easy | Hard | Easy | Hard | Easy | Hard | Easy | Hard | Easy | Hard |
-| Grab Roller  | 89%      | **87%** | 74%  | 43%  | 96%  | 80%  | 66%  | 6%   | 98%  | 0%   | 98%  | 2%   |
-| Handover Mic | 98%      | **40%** | 90%  | 31%  | 98%  | 13%  | 0%   | 0%   | 53%  | 0%   | 100% | 3%   |
-| Lift Pot     | 87%      | **38%** | 72%  | 9%   | 84%  | 36%  | 7%   | 2%   | 39%  | 0%   | 97%  | 0%   |
