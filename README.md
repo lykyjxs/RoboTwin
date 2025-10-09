@@ -94,6 +94,8 @@ bash collect_data.sh ${task_name} ${task_config} ${gpu_id}
 
 [LLaVA-VLA](https://robotwin-platform.github.io/doc/usage/LLaVA-VLA.html) (Contributed by IRPN Lab, HKUST(GZ))
 
+[GO-1](https://robotwin-platform.github.io/doc/usage/GO1.html) (Contributed by GO-1 Team)
+
 Deploy Your Policy: [Guidance](https://robotwin-platform.github.io/doc/usage/deploy-your-policy.html)
 
 ⏰ TODO: G3Flow, HybridVLA, SmolVLA, AVR, UniVLA
