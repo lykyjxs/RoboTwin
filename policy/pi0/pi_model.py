@@ -32,10 +32,15 @@ class PI0:
         self.checkpoint_id = checkpoint_id
 
         config = _config.get_config(self.train_config_name)
+
+        specified_path = f"policy/pi0/checkpoints/{self.train_config_name}/{self.model_name}/{self.checkpoint_id}/assets/"
+        entries = os.listdir(specified_path)
+        assets_id = entries[0]
+
         self.policy = _policy_config.create_trained_policy(
             config,
             f"policy/pi0/checkpoints/{self.train_config_name}/{self.model_name}/{self.checkpoint_id}",
-            robotwin_repo_id=model_name)
+            robotwin_repo_id=assets_id)
         print("loading model success!")
         self.img_size = (224, 224)
         self.observation_window = None
