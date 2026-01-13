@@ -584,7 +584,7 @@ _CONFIGS = [
         name="pi0_base_aloha_robotwin_lora",
         model=pi0_config.Pi0Config(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"),
         data=LeRobotAlohaDataConfig(
-            repo_id="test",  # your datasets repo_id
+            repo_id="your_repo_id",  # your datasets repo_id
             adapt_to_pi=False,
             repack_transforms=_transforms.Group(inputs=[
                 _transforms.RepackTransform({
@@ -599,7 +599,6 @@ _CONFIGS = [
                 })
             ]),
             base_config=DataConfig(
-                local_files_only=True,  # Set to True for local-only datasets.
                 prompt_from_task=True,  # Set to True for prompt by task_name
             ),
         ),
@@ -630,7 +629,6 @@ _CONFIGS = [
                 })
             ]),
             base_config=DataConfig(
-                local_files_only=True,  # Set to True for local-only datasets.
                 prompt_from_task=True,
             ),
         ),
@@ -662,7 +660,6 @@ _CONFIGS = [
                 })
             ]),
             base_config=DataConfig(
-                local_files_only=True,  # Set to True for local-only datasets.
                 prompt_from_task=True,  # Set to True for prompt by task_name
             ),
         ),
