@@ -27,6 +27,8 @@ Accepted to <i style="color: red; display: inline;"><b>ECCV Workshop 2024 (Best 
 | Branch Name | Link |
 |-------------|------|
 | 2.0 Version Branch | [main](https://github.com/RoboTwin-Platform/RoboTwin/tree/main) (latest) |
+| IsaacLab-Arena Branch | [IsaacLab-Arena](https://github.com/RoboTwin-Platform/RoboTwin/tree/IsaacLab-Arena) |
+| RLinf Branch | [RLinf_support](https://github.com/RoboTwin-Platform/RoboTwin/tree/RLinf_support) |
 | 1.0 Version Branch | [1.0 Version](https://github.com/RoboTwin-Platform/RoboTwin/tree/RoboTwin-1.0) |
 | 1.0 Version Code Generation Branch | [1.0 Version GPT](https://github.com/RoboTwin-Platform/RoboTwin/tree/gpt) |
 | Early Version Branch | [Early Version](https://github.com/RoboTwin-Platform/RoboTwin/tree/early_version) |
@@ -37,6 +39,7 @@ Accepted to <i style="color: red; display: inline;"><b>ECCV Workshop 2024 (Best 
 
 
 # 🐣 Update
+* **2026/01/23**, We update IsaacLab-Arena and RLinf support.
 * **2025/08/28**, We update the RoboTwin 2.0 Paper [PDF](https://arxiv.org/pdf/2506.18088).
 * **2025/08/25**, We fix ACT deployment code and update the [leaderboard](https://robotwin-platform.github.io/leaderboard).
 * **2025/08/06**, We release RoboTwin 2.0 Leaderboard: [leaderboard website](https://robotwin-platform.github.io/leaderboard).
