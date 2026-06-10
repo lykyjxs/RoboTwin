@@ -35,6 +35,13 @@ parent_directory = os.path.dirname(current_file_path)
 
 class Base_Task(gym.Env):
 
+    # ===== KeyState Stage 0 labeling: integer codes for per-frame substep encoding =====
+    # 0 is reserved for "none/unset". The offline labeler (envs/utils/keystate_labeler.py)
+    # imports these to decode /keystate_substep/* back into semantic tags.
+    KEYSTATE_STAGE_CODES = {None: 0, "grasp": 1, "lift": 2, "place": 3}
+    KEYSTATE_ACTION_CODES = {None: 0, "move": 1, "gripper_close": 2, "gripper_open": 3}
+    KEYSTATE_ARM_CODES = {None: 0, "left": 1, "right": 2}
+
     def __init__(self):
         pass
 
@@ -128,6 +135,16 @@ class Base_Task(gym.Env):
         self.render_freq = render_freq
 
         self.robot.set_origin_endpose()
+
+        # ===== KeyState Stage 0 labeling (passive logging, off by default) =====
+        # Initialize BEFORE load_actors() so a task registering self.record_actors inside
+        # load_actors() is not overwritten. current_substep: per-frame semantic tag set by
+        # move(stage_tag=...) and recorded by get_obs(). record_actors: (name, actor) list
+        # whose world pose is logged per-frame; empty by default => non-registered tasks
+        # are unaffected.
+        self.current_substep = None
+        self.record_actors = []
+
         self.load_actors()
 
         if self.cluttered_table:
@@ -495,6 +512,28 @@ class Base_Task(gym.Env):
         # pointcloud
         if self.data_type.get("pointcloud", False):
             pkl_dic["pointcloud"] = self.cameras.get_pcd(self.data_type.get("conbine", False))
+
+        # ===== KeyState Stage 0: per-frame semantic substep tag (passive logging) =====
+        # Encode the current_substep dict (set by move(stage_tag=...)) into integer-coded
+        # ndarrays so pkl2hdf5's recursive converter stacks them into (T,) datasets.
+        # Decoding maps live in KEYSTATE_STAGE_CODES / KEYSTATE_ACTION_CODES (class attrs).
+        ss = getattr(self, "current_substep", None) or {}
+        pkl_dic["keystate_substep"] = {
+            "stage_code": np.array(self.KEYSTATE_STAGE_CODES.get(ss.get("stage_tag"), 0), dtype=np.int8),
+            "sub_index": np.array(ss.get("sub_index", 0) or 0, dtype=np.int16),
+            "action_code": np.array(self.KEYSTATE_ACTION_CODES.get(ss.get("action_type"), 0), dtype=np.int8),
+            "arm_code": np.array(self.KEYSTATE_ARM_CODES.get(ss.get("arm_tag"), 0), dtype=np.int8),
+        }
+
+        # ===== KeyState Stage 0: per-frame world poses of registered actors =====
+        if getattr(self, "record_actors", []):
+            obj_pose = {}
+            for name, actor in self.record_actors:
+                pose = actor.get_pose()
+                obj_pose[name] = np.concatenate(
+                    [np.asarray(pose.p, dtype=np.float32),
+                     np.asarray(pose.q, dtype=np.float32)])  # [x,y,z,qw,qx,qy,qz]
+            pkl_dic["object_pose"] = obj_pose
 
         self.now_obs = deepcopy(pkl_dic)
         return pkl_dic
@@ -886,9 +925,16 @@ class Base_Task(gym.Env):
         actions_by_arm1: tuple[ArmTag, list[Action]],
         actions_by_arm2: tuple[ArmTag, list[Action]] = None,
         save_freq=-1,
+        stage_tag: str = None,
     ):
         """
         Take action for the robot.
+
+        stage_tag: optional semantic tag (e.g. "grasp"/"lift"/"place") for KeyState
+            Stage 0 labeling. When set, each Action executed below records its
+            (stage_tag, sub_index, action_type, arm_tag) into self.current_substep
+            so get_obs() can log it per-frame. Pure passive logging — does not affect
+            planning or control. None (default) => no labeling, existing behavior.
         """
 
         def get_actions(actions, arm_tag: ArmTag) -> list[Action]:
@@ -916,11 +962,38 @@ class Base_Task(gym.Env):
         left_actions += [None] * (max_len - len(left_actions))
         right_actions += [None] * (max_len - len(right_actions))
 
+        # KeyState Stage 0: 1-based index of the current Action within this move() call
+        sub_index = 0
+
         for left, right in zip(left_actions, right_actions):
 
             if (left is not None and left.arm_tag != "left") or (right is not None
                                                                  and right.arm_tag != "right"):  # check
                 raise ValueError(f"Invalid arm tag: {left.arm_tag} or {right.arm_tag}. Must be 'left' or 'right'.")
+
+            # KeyState Stage 0: record the semantic identity of the Action about to execute.
+            # Action normalizes open/close to action=="gripper"; distinguish via target_gripper_pos
+            # (close<0.5 -> "gripper_close", open>=0.5 -> "gripper_open"). move stays "move".
+            if stage_tag is not None:
+                sub_index += 1
+                act = left if left is not None else right
+                if act is None:
+                    action_type = None
+                    act_arm = None
+                elif act.action == "move":
+                    action_type = "move"
+                    act_arm = str(act.arm_tag)
+                else:  # gripper
+                    action_type = ("gripper_close"
+                                   if (act.target_gripper_pos is not None and act.target_gripper_pos < 0.5)
+                                   else "gripper_open")
+                    act_arm = str(act.arm_tag)
+                self.current_substep = {
+                    "stage_tag": stage_tag,
+                    "sub_index": sub_index,
+                    "action_type": action_type,
+                    "arm_tag": act_arm,
+                }
 
             if (left is not None and left.action == "move") and (right is not None
                                                                  and right.action == "move"):  # together move
@@ -964,6 +1037,11 @@ class Base_Task(gym.Env):
                         return False
 
             self.take_dense_action(control_seq)
+
+        # KeyState Stage 0: clear the tag so frames from later untagged move() calls
+        # are not mislabeled with this move()'s last substep.
+        if stage_tag is not None:
+            self.current_substep = None
 
         return True
 

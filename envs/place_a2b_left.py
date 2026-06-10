@@ -120,21 +120,25 @@ class place_a2b_left(Base_Task):
         self.add_prohibit_area(self.object, padding=0.05)
         self.add_prohibit_area(self.target_object, padding=0.1)
 
+        # KeyState Stage 0: log per-frame world poses of these two actors for labeling.
+        self.record_actors = [("object", self.object), ("target_object", self.target_object)]
+
     def play_once(self):
         # Determine which arm to use based on object's x position
         arm_tag = ArmTag("right" if self.object.get_pose().p[0] > 0 else "left")
 
         # Grasp the object with specified arm
-        self.move(self.grasp_actor(self.object, arm_tag=arm_tag, pre_grasp_dis=0.1))
+        # KeyState Stage 0: stage_tag tags every frame of this primitive for offline labeling.
+        self.move(self.grasp_actor(self.object, arm_tag=arm_tag, pre_grasp_dis=0.1), stage_tag="grasp")
         # Lift the object upward by 0.1 meters along z-axis using arm movement
-        self.move(self.move_by_displacement(arm_tag=arm_tag, z=0.1, move_axis="arm"))
+        self.move(self.move_by_displacement(arm_tag=arm_tag, z=0.1, move_axis="arm"), stage_tag="lift")
 
         # Get target pose and adjust x position to place object to the left of target
         target_pose = self.target_object.get_pose().p.tolist()
         target_pose[0] -= 0.13
 
         # Place the object at the adjusted target position
-        self.move(self.place_actor(self.object, arm_tag=arm_tag, target_pose=target_pose))
+        self.move(self.place_actor(self.object, arm_tag=arm_tag, target_pose=target_pose), stage_tag="place")
 
         # Record task information including object IDs and used arm
         self.info["info"] = {
