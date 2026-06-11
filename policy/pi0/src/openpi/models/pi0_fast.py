@@ -190,7 +190,7 @@ class Pi0FAST(_model.BaseModel):
                      observation: _model.Observation,
                      actions: _model.Actions,
                      *,
-                     train: bool = False) -> at.Float[at.Array, "*b ah"]:
+                     train: bool = False) -> tuple[at.Float[at.Array, "*b ah"], dict[str, at.Array]]:
         observation = _model.preprocess_observation(rng,
                                                     observation,
                                                     train=train,
@@ -222,7 +222,9 @@ class Pi0FAST(_model.BaseModel):
         assert observation.token_loss_mask is not None, "Token loss mask is required"
         loss_mask = observation.token_loss_mask[:, 1:]
         token_pplx = jnp.sum(targets * logp, axis=-1)
-        return -jnp.sum(token_pplx * loss_mask, axis=-1) / jnp.clip(jnp.sum(loss_mask, -1), 1)
+        loss = -jnp.sum(token_pplx * loss_mask, axis=-1) / jnp.clip(jnp.sum(loss_mask, -1), 1)
+        # Empty aux dict to match the (loss, ks_losses) signature; pi0-fast has no KeyState heads.
+        return loss, {}
 
     @override
     def sample_actions(

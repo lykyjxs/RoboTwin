@@ -63,6 +63,32 @@ def posemb_sincos(pos: at.Real[at.Array, " b"], embedding_dim: int, min_period: 
     return jnp.concatenate([jnp.sin(sinusoid_input), jnp.cos(sinusoid_input)], axis=-1)
 
 
+# ---- KeyState loss helpers ----
+# All return a per-sample [b] vector (no reduction), so the caller can apply a valid-mask.
+
+
+def _softmax_xent(logits, labels):
+    """Per-sample softmax cross-entropy. logits: [b, k], labels: [b] int. Returns [b]."""
+    logp = jax.nn.log_softmax(logits, axis=-1)
+    return -jnp.take_along_axis(logp, labels[:, None], axis=-1)[:, 0]
+
+
+def _sigmoid_bce(logits, targets):
+    """Per-sample multi-label BCE, summed over labels. logits/targets: [b, c]. Returns [b]."""
+    # numerically stable: max(x,0) - x*z + log(1+exp(-|x|))
+    per_label = jnp.maximum(logits, 0) - logits * targets + jnp.log1p(jnp.exp(-jnp.abs(logits)))
+    return jnp.sum(per_label, axis=-1)
+
+
+def _coral_loss(cum_logits, labels, n_bins):
+    """CORAL ordinal loss. cum_logits: [b, n_bins-1] cumulative P(bin>j) logits, labels: [b] int.
+    Target for rank k is the binary vector 1[k > j] for j=0..n_bins-2. Returns [b]."""
+    j = jnp.arange(n_bins - 1)
+    targets = (labels[:, None] > j[None, :]).astype(cum_logits.dtype)  # [b, n_bins-1]
+    per = jnp.maximum(cum_logits, 0) - cum_logits * targets + jnp.log1p(jnp.exp(-jnp.abs(cum_logits)))
+    return jnp.sum(per, axis=-1)
+
+
 @dataclasses.dataclass(frozen=True)
 class Pi0Config(_model.BaseModelConfig):
     dtype: str = "bfloat16"
@@ -73,6 +99,43 @@ class Pi0Config(_model.BaseModelConfig):
     action_dim: int = 32
     action_horizon: int = 50
     max_token_len: int = 48
+
+    # ---- KeyState heads (Stage 1) ----
+    # All default OFF: when every use_* is False, no new params are created and the model is
+    # bit-identical to the original pi0 (freeze filter / FSDP / weight load / loss all unchanged).
+    use_checkpoint_head: bool = False  # dense next-checkpoint type classification + horizon binning
+    use_phase_head: bool = False  # 3-way multi-label semantic phase (BCE)
+    use_z_head: bool = False  # latent KeyState-JEPA head (Stage 2; hard-gated in __post_init__)
+    use_keystate_fusion: bool = False  # inject keystate condition into action expert (Stage 3; hard-gated)
+
+    num_checkpoint_types: int = 3  # configurable vocab: {0:none, 1:pre_grasp, 2:pre_place, ...}
+    num_phase_classes: int = 3  # {object_in_hand, lifted, placed_and_released}
+    z_dim: int = 64  # latent dim placeholder (Stage 2)
+
+    lambda_type: float = 1.0
+    lambda_h: float = 1.0
+    lambda_ph: float = 1.0
+    lambda_z: float = 0.0
+
+    # horizon log-spaced bins via upper edges, "h < edge -> that bin" semantics (most intuitive):
+    #   h<3 -> bin0(0,1,2)  h<6 -> bin1(3,4,5)  h<11 -> bin2(6..10)
+    #   h<21 -> bin3(11..20)  h<51 -> bin4(21..50)  else -> bin5(>50)
+    # num_horizon_bins = len(horizon_upper_edges) + 1 = 6
+    horizon_upper_edges: tuple[int, ...] = (3, 6, 11, 21, 51)
+    horizon_loss_type: str = "ce"  # "ce" (default, simple to debug) | "ordinal" (CORAL, ablation)
+
+    def __post_init__(self):
+        # Hard gates: z head (Stage 2) and KeyState->Action fusion (Stage 3) are scaffolded
+        # but NOT implemented this round. Block them at config construction so no config can
+        # silently enable a half-built path.
+        if self.use_z_head:
+            raise NotImplementedError(
+                "KeyState-JEPA z head needs the EMA encoder / z_target (Stage 2); not implemented this round.")
+        if self.use_keystate_fusion:
+            raise NotImplementedError(
+                "KeyState->Action fusion is reserved for Stage 3; keep use_keystate_fusion=False in Stage 1.")
+        if self.horizon_loss_type not in ("ce", "ordinal"):
+            raise ValueError(f"horizon_loss_type must be 'ce' or 'ordinal', got {self.horizon_loss_type!r}")
 
     @property
     @override
@@ -161,6 +224,31 @@ class Pi0(_model.BaseModel):
         self.action_time_mlp_out = nnx.Linear(action_expert_config.width, action_expert_config.width, rngs=rngs)
         self.action_out_proj = nnx.Linear(action_expert_config.width, config.action_dim, rngs=rngs)
 
+        # ---- KeyState heads (Stage 1) ----
+        # Keep the config around so compute_loss can read the use_*/lambda_*/horizon_* knobs.
+        self._ks = config
+        # Heads read the PaliGemma (prefix / VLM) stream -- "which checkpoint / phase am I in" is a
+        # perception+instruction question -- so they project from paligemma width, not action-expert width.
+        pg_w = paligemma_config.width
+        ae_w = action_expert_config.width
+        n_bins = len(config.horizon_upper_edges) + 1  # = 6
+        if config.use_checkpoint_head:
+            self.ks_type_head = nnx.Linear(pg_w, config.num_checkpoint_types, rngs=rngs)
+            # head output dim depends on loss mode: ce -> n_bins class logits; ordinal(CORAL) -> n_bins-1 cumulative logits
+            h_out = n_bins if config.horizon_loss_type == "ce" else n_bins - 1
+            self.ks_horizon_head = nnx.Linear(pg_w, h_out, rngs=rngs)
+        if config.use_phase_head:
+            self.ks_phase_head = nnx.Linear(pg_w, config.num_phase_classes, rngs=rngs)
+        # The two branches below are hard-gated off in Pi0Config.__post_init__ this round; the
+        # scaffold is kept for Stage 2 (z head) / Stage 3 (fusion) reuse and review.
+        if config.use_z_head:  # Stage 2 placeholder (loss not implemented this round)
+            self.ks_z_head = nnx.Linear(pg_w, config.z_dim, rngs=rngs)
+        if config.use_keystate_fusion:  # Stage 3 placeholder
+            self.ks_type_embed = nnx.Embed(config.num_checkpoint_types, ae_w, rngs=rngs)
+            self.ks_horizon_embed = nnx.Embed(n_bins, ae_w, rngs=rngs)
+            self.ks_z_proj = nnx.Linear(config.z_dim, ae_w, rngs=rngs)
+            self.ks_fuse_proj = nnx.Linear(ae_w, ae_w, rngs=rngs)
+
     @at.typecheck
     def embed_prefix(
         self, obs: _model.Observation
@@ -195,11 +283,23 @@ class Pi0(_model.BaseModel):
 
     @at.typecheck
     def embed_suffix(
-        self, obs: _model.Observation, noisy_actions: _model.Actions, timestep: at.Float[at.Array, " b"]
+        self,
+        obs: _model.Observation,
+        noisy_actions: _model.Actions,
+        timestep: at.Float[at.Array, " b"],
+        ks_cond: at.Float[at.Array, "b emb"] | None = None,
     ) -> tuple[at.Float[at.Array, "b s emb"], at.Bool[at.Array, "b s"], at.Bool[at.Array, " s"]]:
         input_mask = []
         ar_mask = []
         tokens = []
+        # KeyState->Action fusion (Stage 3 scaffold, hard-gated off this round): prepend one
+        # condition token before the state token. Action tokens stay last so the
+        # `suffix_out[:, -action_horizon:]` slice is unaffected. ks_cond is None in Stage 1, so
+        # this branch never runs and the suffix layout is bit-identical to the original.
+        if ks_cond is not None:
+            tokens.append(ks_cond[:, None, :])
+            input_mask.append(jnp.ones((ks_cond.shape[0], 1), dtype=jnp.bool_))
+            ar_mask += [True]
         # add a single state token
         state_token = self.state_proj(obs.state)[:, None, :]
         tokens.append(state_token)
@@ -231,7 +331,7 @@ class Pi0(_model.BaseModel):
                      observation: _model.Observation,
                      actions: _model.Actions,
                      *,
-                     train: bool = False) -> at.Float[at.Array, "*b ah"]:
+                     train: bool = False) -> tuple[at.Float[at.Array, "*b ah"], dict[str, at.Array]]:
         preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
         observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
 
@@ -253,8 +353,57 @@ class Pi0(_model.BaseModel):
                                                          mask=attn_mask,
                                                          positions=positions)
         v_t = self.action_out_proj(suffix_out[:, -self.action_horizon:])
+        flow_loss = jnp.mean(jnp.square(v_t - u_t), axis=-1)
 
-        return jnp.mean(jnp.square(v_t - u_t), axis=-1)
+        ks_losses = self._keystate_losses(prefix_out, prefix_mask, observation)
+        return flow_loss, ks_losses
+
+    def _keystate_losses(self, prefix_out, prefix_mask, obs) -> dict[str, at.Array]:
+        """KeyState auxiliary losses (Stage 1). Returns {} for baseline / when labels absent,
+        so train.py's `sum(ks_losses.values())` is a no-op and behaviour is unchanged."""
+        ks_losses: dict[str, at.Array] = {}
+        need_ks = self._ks.use_checkpoint_head or self._ks.use_phase_head
+        if not need_ks or obs.keystate_h is None:  # None => baseline / fake data: skip entirely
+            return ks_losses
+
+        # masked-mean pool over the prefix (VLM) tokens -> [b, pg_w]
+        pooled = (prefix_out * prefix_mask[..., None]).sum(1) / jnp.clip(prefix_mask.sum(1, keepdims=True), 1)
+
+        # per-sample valid mask: frames past the last checkpoint have h_ckpt == -1 (no next checkpoint).
+        # Their type/horizon are meaningless -> mask them out of type/horizon (phase stays well-defined).
+        valid_b = obs.keystate_h >= 0  # [b] bool
+        valid = valid_b.astype(jnp.float32)
+        denom = jnp.clip(valid.sum(), 1.0)
+
+        def masked_mean(per_sample):
+            return (valid * per_sample).sum() / denom
+
+        if self._ks.use_checkpoint_head:
+            # Supervise with the DENSE next_checkpoint_type (sparse checkpoint_type marks only 2 frames).
+            # safe-label BEFORE the loss: never let an invalid/meaningless label enter CE/ordinal
+            # (integer-label CE treats -1 as a negative index = last class; and 0 * NaN = NaN would
+            # survive the later mask). where(valid, label, 0) -> safe class 0, then mask.
+            type_label = jnp.where(valid_b, obs.keystate_type, 0)
+            type_ce = _softmax_xent(self.ks_type_head(pooled), type_label)
+            ks_losses["loss_type"] = self._ks.lambda_type * masked_mean(type_ce)
+
+            h_label = jnp.where(valid_b, obs.keystate_h, 0)  # bucket index 0..5; safe 0 for invalid
+            h_logits = self.ks_horizon_head(pooled)
+            if self._ks.horizon_loss_type == "ce":
+                h_loss = _softmax_xent(h_logits, h_label)
+            else:  # "ordinal" (CORAL)
+                n_bins = len(self._ks.horizon_upper_edges) + 1
+                h_loss = _coral_loss(h_logits, h_label, n_bins)
+            ks_losses["loss_h"] = self._ks.lambda_h * masked_mean(h_loss)
+
+        if self._ks.use_phase_head:
+            # phase is well-defined on every frame -> no valid mask, plain batch-mean.
+            phase_bce = _sigmoid_bce(self.ks_phase_head(pooled), obs.keystate_phase)
+            ks_losses["loss_ph"] = self._ks.lambda_ph * jnp.mean(phase_bce)
+
+        # Note: z head loss is NOT implemented this round (needs Stage 2 EMA encoder / z_target);
+        # use_z_head=True already raises in Pi0Config.__post_init__.
+        return ks_losses
 
     @override
     def sample_actions(

@@ -48,12 +48,16 @@ class CheckpointWeightLoader(WeightLoader):
     """
 
     params_path: str
+    # Regex for reference params that are allowed to be missing from the checkpoint and kept at their
+    # (freshly initialized) values. Defaults to LoRA-only, preserving previous behaviour. KeyState
+    # configs widen this to `.*(lora|ks_).*` so the new randomly-initialized ks_* heads are tolerated.
+    missing_regex: str = ".*lora.*"
 
     def load(self, params: at.Params) -> at.Params:
         # We are loading np.ndarray and relying on the training code to properly convert and shard the params.
         loaded_params = _model.restore_params(download.maybe_download(self.params_path), restore_type=np.ndarray)
-        # Add all missing LoRA weights.
-        return _merge_params(loaded_params, params, missing_regex=".*lora.*")
+        # Add all missing weights matched by `missing_regex` (e.g. LoRA, and KeyState ks_* heads).
+        return _merge_params(loaded_params, params, missing_regex=self.missing_regex)
 
 
 @dataclasses.dataclass(frozen=True)

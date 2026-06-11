@@ -19,6 +19,7 @@ import openpi.models.pi0_fast as pi0_fast
 import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
+import openpi.policies.keystate as keystate_policy
 import openpi.policies.libero_policy as libero_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
@@ -241,6 +242,28 @@ class LeRobotAlohaDataConfig(DataConfigFactory):
 
 
 @dataclasses.dataclass(frozen=False)
+class KeyStateAlohaDataConfig(LeRobotAlohaDataConfig):
+    """LeRobotAlohaDataConfig + KeyState (Stage 1) supervision labels.
+
+    Identical to the parent except it (a) repacks the per-frame keystate sub-dict from the
+    LeRobot `observation.keystate.*` features, and (b) pushes `KeyStateInputs` after `AlohaInputs`
+    to derive the model labels (keystate_type / keystate_h / keystate_phase). keystate stays a
+    current-frame singleton: it is NOT added to `action_sequence_keys`, so it is never windowed.
+    """
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        # Start from the parent config (AlohaInputs/Outputs, optional delta actions, model transforms).
+        base = super().create(assets_dirs, model_config)
+        # Bucket edges must match the head: read them off the model config when available.
+        horizon_upper_edges = tuple(getattr(model_config, "horizon_upper_edges", (3, 6, 11, 21, 51)))
+        data_transforms = base.data_transforms.push(
+            inputs=[keystate_policy.KeyStateInputs(horizon_upper_edges=horizon_upper_edges)],
+        )
+        return dataclasses.replace(base, data_transforms=data_transforms)
+
+
+@dataclasses.dataclass(frozen=False)
 class LeRobotLiberoDataConfig(DataConfigFactory):
 
     @override
@@ -406,6 +429,55 @@ _CONFIGS = [
                                     action_expert_variant="gemma_300m_lora").get_freeze_filter(),
         batch_size=32,  # the total batch_size not pre_gpu batch_size
         weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=30000,
+        fsdp_devices=1,  # refer line 359
+    ),
+    # pi0_base by lora + KeyState heads (Stage 1 warm-up): copy of pi0_base_aloha_robotwin_lora with
+    # the checkpoint/phase heads turned on, aux lambdas kept small (0.1) so they don't drown the flow
+    # loss, and the weight loader widened to tolerate the freshly-initialized ks_* heads.
+    TrainConfig(
+        name="pi0_base_aloha_robotwin_keystate_lora",
+        model=pi0.Pi0Config(
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            use_checkpoint_head=True,
+            use_phase_head=True,
+            lambda_type=0.1,
+            lambda_h=0.1,
+            lambda_ph=0.1,
+        ),
+        data=KeyStateAlohaDataConfig(
+            repo_id="test",  # your datasets repo_id
+            adapt_to_pi=False,
+            repack_transforms=_transforms.Group(inputs=[
+                _transforms.RepackTransform({
+                    "images": {
+                        "cam_high": "observation.images.cam_high",
+                        "cam_left_wrist": "observation.images.cam_left_wrist",
+                        "cam_right_wrist": "observation.images.cam_right_wrist",
+                    },
+                    "state": "observation.state",
+                    "actions": "action",
+                    "prompt": "prompt",
+                    "keystate": {
+                        "next_checkpoint_type": "observation.keystate.next_checkpoint_type",
+                        "h_ckpt": "observation.keystate.h_ckpt",
+                        "semantic_phase": "observation.keystate.semantic_phase",
+                    },
+                })
+            ]),
+            base_config=DataConfig(
+                local_files_only=True,  # Set to True for local-only datasets.
+                prompt_from_task=True,  # Set to True for prompt by task_name
+            ),
+        ),
+        freeze_filter=pi0.Pi0Config(paligemma_variant="gemma_2b_lora",
+                                    action_expert_variant="gemma_300m_lora").get_freeze_filter(),
+        batch_size=32,  # the total batch_size not pre_gpu batch_size
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "s3://openpi-assets/checkpoints/pi0_base/params",
+            missing_regex=".*(lora|ks_).*",  # tolerate randomly-initialized KeyState heads
+        ),
         num_train_steps=30000,
         fsdp_devices=1,  # refer line 359
     ),

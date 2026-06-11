@@ -100,6 +100,12 @@ class Observation(Generic[ArrayT]):
     # Token loss mask (for FAST autoregressive model).
     token_loss_mask: at.Bool[ArrayT, "*b l"] | None = None
 
+    # KeyState supervision labels (Stage 1; training only, all None at inference / for baselines).
+    # Per-frame (current-frame) labels -- NOT windowed over the action horizon.
+    keystate_type: at.Int[ArrayT, "*b"] | None = None  # dense next_checkpoint_type
+    keystate_h: at.Int[ArrayT, "*b"] | None = None  # horizon bucket index; -1 = invalid (no next checkpoint)
+    keystate_phase: at.Float[ArrayT, "*b p"] | None = None  # multi-label semantic phase targets
+
     @classmethod
     def from_dict(cls, data: at.PyTree[ArrayT]) -> "Observation[ArrayT]":
         """This method defines the mapping between unstructured data (i.e., nested dict) to the structured Observation format."""
@@ -118,6 +124,9 @@ class Observation(Generic[ArrayT]):
             tokenized_prompt_mask=data.get("tokenized_prompt_mask"),
             token_ar_mask=data.get("token_ar_mask"),
             token_loss_mask=data.get("token_loss_mask"),
+            keystate_type=data.get("keystate_type"),
+            keystate_h=data.get("keystate_h"),
+            keystate_phase=data.get("keystate_phase"),
         )
 
     def to_dict(self) -> at.PyTree[ArrayT]:
@@ -197,6 +206,9 @@ def preprocess_observation(
         tokenized_prompt_mask=observation.tokenized_prompt_mask,
         token_ar_mask=observation.token_ar_mask,
         token_loss_mask=observation.token_loss_mask,
+        keystate_type=observation.keystate_type,
+        keystate_h=observation.keystate_h,
+        keystate_phase=observation.keystate_phase,
     )
 
 
@@ -263,7 +275,9 @@ class BaseModel(nnx.Module, abc.ABC):
         actions: Actions,
         *,
         train: bool = False,
-    ) -> at.Float[at.Array, "*b ah"]:
+    ) -> tuple[at.Float[at.Array, "*b ah"], dict[str, at.Array]]:
+        # Returns (per-element flow-matching loss [*b, ah], dict of scalar auxiliary losses).
+        # The aux dict is empty for models / configs without KeyState heads.
         ...
 
     @abc.abstractmethod

@@ -95,6 +95,12 @@ class AlohaInputs(transforms.DataTransformFn):
         if "prompt" in data:
             inputs["prompt"] = data["prompt"]
 
+        # KeyState labels (Stage 1): forward the raw per-frame keystate sub-dict untouched so the
+        # KeyStateInputs transform (pushed after this one) can derive the model labels. Absent for
+        # baseline configs / at inference -> nothing forwarded, behaviour unchanged.
+        if "keystate" in data:
+            inputs["keystate"] = data["keystate"]
+
         return inputs
 
 
