@@ -26,6 +26,8 @@ def load_keystate(hdf5_path):
         a = dict(ks.attrs)
         d = {
             "checkpoint_type": ks["checkpoint_type"][()],
+            # dense next_checkpoint_type (labeler v2+); fall back gracefully if labeling is stale
+            "next_checkpoint_type": ks["next_checkpoint_type"][()] if "next_checkpoint_type" in ks else None,
             "h_ckpt": ks["h_ckpt"][()],
             "object_in_hand": ks["object_in_hand"][()],
             "lifted": ks["lifted"][()],
@@ -99,6 +101,29 @@ def check_episode(ep, hdf5_path, scene_info):
         problems.append("checkpoint_type at pre_grasp != 1")
     if pp >= 0 and d["checkpoint_type"][pp] != 2:
         problems.append("checkpoint_type at pre_place != 2")
+
+    # 9. dense next_checkpoint_type consistency (labeler v2+):
+    #    valid frames (h_ckpt>=0) must have type in {1,2}; invalid frames (h_ckpt<0) must have type 0.
+    #    Also the dense type must equal the type of the nearest future checkpoint (== checkpoint_type[nxt]).
+    nct = d["next_checkpoint_type"]
+    if nct is not None:
+        h = d["h_ckpt"]
+        valid = h >= 0
+        if not np.all(np.isin(nct[valid], (1, 2))):
+            problems.append(f"next_checkpoint_type on valid frames not in {{1,2}} (got {set(nct[valid].tolist())})")
+        if np.any(nct[~valid] != 0):
+            problems.append("next_checkpoint_type on invalid (h<0) frames != 0")
+        # past pre_grasp but before pre_place -> next target is pre_place -> type must be 2 (not 1)
+        if pg >= 0 and pp >= 0:
+            mid = np.arange(T)
+            mid_mask = (mid > pg) & (mid <= pp)
+            if mid_mask.any() and np.any(nct[mid_mask] != 2):
+                problems.append("next_checkpoint_type between pre_grasp and pre_place != 2")
+            before_mask = (mid <= pg)
+            if before_mask.any() and np.any(nct[before_mask] != 1):
+                problems.append("next_checkpoint_type up to pre_grasp != 1")
+    else:
+        problems.append("next_checkpoint_type missing (stale labeler < v2; re-run keystate_labeler)")
 
     # 7. object actually rises (cross-check lifted against object z)
     z_note = ""

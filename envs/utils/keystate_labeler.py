@@ -32,7 +32,7 @@ import os
 import h5py
 import numpy as np
 
-LABELER_VERSION = 1
+LABELER_VERSION = 2  # v2: add dense next_checkpoint_type (Stage 1 supervision target)
 
 # Inverse of Base_Task.KEYSTATE_*_CODES (kept in sync with envs/_base_task.py).
 STAGE_DECODE = {0: None, 1: "grasp", 2: "lift", 3: "place"}
@@ -161,10 +161,17 @@ def label_episode(data):
 
     ckpts = sorted([c for c in (pre_grasp_idx, pre_place_idx) if c >= 0])
     h_ckpt = np.full(T, -1, dtype=np.int32)
+    # dense next-checkpoint type: type of the nearest *future* checkpoint at each t.
+    # This is what the model is supervised on (sparse `checkpoint_type` above is only the
+    # 2 event frames; the model needs "looking forward from t, what's the next checkpoint").
+    # Strictly co-derived with h_ckpt so the two are always consistent (same `nxt`).
+    # 0 on frames past the last checkpoint (h_ckpt == -1); those are masked out in training.
+    next_checkpoint_type = np.zeros(T, dtype=np.int8)
     for t in range(T):
         nxt = next((c for c in ckpts if c >= t), None)
         if nxt is not None:
             h_ckpt[t] = nxt - t
+            next_checkpoint_type[t] = checkpoint_type[nxt]
 
     semantic_phase = np.stack([object_in_hand, lifted, placed_and_released], axis=1).astype(np.uint8)
 
@@ -174,6 +181,7 @@ def label_episode(data):
 
     labels = {
         "checkpoint_type": checkpoint_type,
+        "next_checkpoint_type": next_checkpoint_type,
         "h_ckpt": h_ckpt,
         "object_in_hand": object_in_hand,
         "lifted": lifted,
