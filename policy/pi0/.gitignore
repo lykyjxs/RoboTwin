@@ -3,6 +3,8 @@ assets/
 checkpoints/
 data/
 wandb/
+training_data/
+eval_outputs/
 
 !models/
 

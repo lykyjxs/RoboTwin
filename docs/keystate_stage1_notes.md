@@ -107,7 +107,7 @@ Stage0 采集 hdf5  /keystate{checkpoint_type(sparse), next_checkpoint_type(dens
 | 11 | config.py 接线 KeyStateAlohaDataConfig + 新 TrainConfig | ✅ 完成 |
 
 > **Stage 1 模型修改全部完成,纯静态验证已过**(全文件 py_compile;`bucket_horizon` 与 `Pi0Config.horizon_upper_edges` 语义逐桶比对一致;`KeyStateInputs` stub 跑通:-1 sentinel 保留、有效 horizon 正确分桶、无 keystate 时 no-op;config.py AST 校验配置名唯一且新 config 存在)。
-> **仍需在有数据 + pi0 uv 环境的机器上跑端到端验证(见 §6 Verification 0/1/2/3/4/5/6)** —— 本环境无 hdf5、无 jax/uv,无法实跑训练。
+> **仍需在真实数据 + 可用 pi0/GPU 环境上跑端到端验证(见 §6/§8)**。当前已拿到真实 hdf5 路径,但当前会话所在节点没有可直接训练的 pi0 Python 环境/GPU CLI;debug worker 启动还需解决 Volcano Engine `ml_devinstance launch` 的当前 devinstance/权限问题。
 
 ---
 
@@ -125,21 +125,65 @@ Stage0 采集 hdf5  /keystate{checkpoint_type(sparse), next_checkpoint_type(dens
 
 ## 6. 下一轮继续顺序
 
-模型修改已全部完成并 commit。下一轮 = **在有数据 + pi0 uv 环境的机器上跑端到端验证**:
-1. `git checkout keystate-stage1-heads`,确认 §2(b) 文件齐。
-2. 按 §6 Verification 逐项跑(0 labeler / 1 baseline 不回归 / 2 数据管线 / 3 safe-label+mask / 4 训练出 loss / 5 加载兼容 / 6 eval 不挂)。
-3. 验证通过后再开 Stage 2(z head / KeyState-JEPA)。
+模型修改已全部完成并 commit。下一轮 = **在真实数据 + 可用 pi0/GPU 环境上跑端到端验证**。注意:本轮验证只做 1-episode overfit/smoke debug,**不要直接 full training,不要自动 commit**。
 
-### Verification(plan §Verification)
+### 6.1 真实数据路径与第一步检查
+
+真实 RoboTwin hdf5 数据已确认由用户提供在:
+
+```bash
+./data/RoboTwin/data/place_a2b_left/demo_clean/data/
+```
+
+该目录应包含 `episode0.hdf5 ... episode49.hdf5`。第一步必须先检查 `episode0.hdf5` 的 `/keystate` group:
+
+```bash
+python3 - <<'PY'
+import h5py
+p = "./data/RoboTwin/data/place_a2b_left/demo_clean/data/episode0.hdf5"
+with h5py.File(p, "r") as f:
+    print("exists:", p)
+    print("/keystate keys:", list(f["/keystate"].keys()))
+    for k in ["checkpoint_type", "next_checkpoint_type", "h_ckpt", "semantic_phase"]:
+        d = f["/keystate"][k]
+        print(k, "shape=", d.shape, "dtype=", d.dtype)
+PY
+```
+
+必须确认有:
+- `checkpoint_type`
+- `next_checkpoint_type`
+- `h_ckpt`
+- `semantic_phase`
+
+### 6.2 1-episode tiny dataset + smoke train
+
+只取 `episode0.hdf5` 构造 tiny dataset,然后跑:
+
+1. `pi0_base_aloha_robotwin_keystate_lora` 的 **20-step smoke train**。
+2. 确认没有:
+   - NaN
+   - shape error
+   - weight loading error (`ks_*` 新头应被 `missing_regex=.*(lora|ks_).*` 容忍,随机初始化)
+3. 如果 20 steps 正常,再跑 **100~500 steps**(仍然是 1-episode overfit debug,不是完整训练),观察:
+   - `flow_loss` 是否下降
+   - `loss_type` 是否下降
+   - `loss_h` 是否下降
+   - `loss_ph` 是否下降
+
+这个实验只用于验证代码和训练链路能正常学习,不用于证明方法有效。
+
+### 6.3 Verification(plan §Verification)
+
 - **0 labeler**:重跑 `keystate_labeler.py` 后 `keystate_inspect.py` 断言全过(dense type 段语义)。
 - **1 baseline 不回归**:`uv run scripts/train.py pi0_base_aloha_robotwin_lora` loss 与改动前一致、无加载报错。
 - **2 数据管线**:中间 hdf5 有 `observations/keystate/*`、LeRobot features 含 `observation.keystate.*`;batch 里 `keystate_h` 的 -1 原样保留(没被 clip 成 0)。
 - **3 safe-label+mask 关键回归**:全 invalid(h=-1)batch 不产 NaN/不报越界。
-- **4 Stage 1 训练**:wandb 出现 `flow_loss/loss_type/loss_h/loss_ph` 且下降。
+- **4 Stage 1 训练**:wandb/日志出现 `flow_loss/loss_type/loss_h/loss_ph` 且在 1-episode overfit debug 中有下降趋势。
 - **5 加载兼容**:`ks_*` 头被 `missing_regex` 容忍、随机初始化。
 - **6 eval 不挂**:`pi_model.py`/`eval.sh` 在 keystate 为 None、融合关时与原版一致。
 
-> ⚠️ **数据相关验证(0/2/3)需要实际采集数据。** 当前 checkout **无 hdf5**(`data/place_a2b_left/demo_clean/data/` 为空,数据在 `.gitignore`),需在有数据的机器上做。
+> ⚠️ **数据相关验证(0/2/3)需要实际采集数据。** 真实数据路径已知,但需在可用 pi0 Python 环境 + GPU worker 上执行。
 
 ---
 
@@ -149,3 +193,5 @@ Stage0 采集 hdf5  /keystate{checkpoint_type(sparse), next_checkpoint_type(dens
 - `Observation` 新增:`keystate_type`(dense type,[*b] int)、`keystate_h`(桶 index,-1=invalid)、`keystate_phase`([*b,3] float)。
 - 新 TrainConfig 名:`pi0_base_aloha_robotwin_keystate_lora`(拷贝 `pi0_base_aloha_robotwin_lora`,开 `use_checkpoint_head/use_phase_head`,λ=0.1,`weight_loader` missing_regex `.*(lora|ks_).*`)。
 - 新 transform:`KeyStateInputs(horizon_upper_edges=...)`,在 `AlohaInputs` 之后 push;`AlohaInputs` 加一行 `keystate` 透传;repack 加 `"keystate"` 子 dict 映射 `observation.keystate.{next_checkpoint_type,h_ckpt,semantic_phase}`。
+
+---

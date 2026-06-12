@@ -354,6 +354,9 @@ class TrainConfig:
     log_interval: int = 100
     # How often (in steps) to save checkpoints.
     save_interval: int = 1000
+    # If true, save a final checkpoint at the end of training. Disable for short overfit
+    # smoke tests on filesystems where Orbax/TensorStore checkpoint writes are unreliable.
+    save_final_checkpoint: bool = True
     # If set, any existing checkpoints matching step % keep_period == 0 will not be deleted.
     keep_period: int | None = 5000
 
@@ -447,7 +450,7 @@ _CONFIGS = [
             lambda_ph=0.1,
         ),
         data=KeyStateAlohaDataConfig(
-            repo_id="test",  # your datasets repo_id
+            repo_id="place_a2b_left_keystate_oneshot",  # 1-episode overfit dataset
             adapt_to_pi=False,
             repack_transforms=_transforms.Group(inputs=[
                 _transforms.RepackTransform({
