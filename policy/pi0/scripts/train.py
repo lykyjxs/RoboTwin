@@ -219,7 +219,7 @@ def train_step(
         "loss": loss,
         "grad_norm": optax.global_norm(grads),
         "param_norm": optax.global_norm(kernel_params),
-        # flow_loss + per-term KeyState losses (loss_type/loss_h/loss_ph); empty for baselines.
+        # flow_loss + per-term KeyState losses (loss_type/loss_h_entry/loss_ph); empty for baselines.
         **aux,
     }
     return new_state, info

@@ -103,7 +103,7 @@ class Observation(Generic[ArrayT]):
     # KeyState supervision labels (Stage 1; training only, all None at inference / for baselines).
     # Per-frame (current-frame) labels -- NOT windowed over the action horizon.
     keystate_type: at.Int[ArrayT, "*b"] | None = None  # dense next_checkpoint_type
-    keystate_h: at.Int[ArrayT, "*b"] | None = None  # horizon bucket index; -1 = invalid (no next checkpoint)
+    keystate_h_entry: at.Int[ArrayT, "*b"] | None = None  # h_entry bucket index; -1 = no next/current window
     keystate_phase: at.Float[ArrayT, "*b p"] | None = None  # multi-label semantic phase targets
 
     @classmethod
@@ -125,7 +125,7 @@ class Observation(Generic[ArrayT]):
             token_ar_mask=data.get("token_ar_mask"),
             token_loss_mask=data.get("token_loss_mask"),
             keystate_type=data.get("keystate_type"),
-            keystate_h=data.get("keystate_h"),
+            keystate_h_entry=data.get("keystate_h_entry"),
             keystate_phase=data.get("keystate_phase"),
         )
 
@@ -207,7 +207,7 @@ def preprocess_observation(
         token_ar_mask=observation.token_ar_mask,
         token_loss_mask=observation.token_loss_mask,
         keystate_type=observation.keystate_type,
-        keystate_h=observation.keystate_h,
+        keystate_h_entry=observation.keystate_h_entry,
         keystate_phase=observation.keystate_phase,
     )
 

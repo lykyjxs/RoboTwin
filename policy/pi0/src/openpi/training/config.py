@@ -247,7 +247,7 @@ class KeyStateAlohaDataConfig(LeRobotAlohaDataConfig):
 
     Identical to the parent except it (a) repacks the per-frame keystate sub-dict from the
     LeRobot `observation.keystate.*` features, and (b) pushes `KeyStateInputs` after `AlohaInputs`
-    to derive the model labels (keystate_type / keystate_h / keystate_phase). keystate stays a
+    to derive the model labels (keystate_type / keystate_h_entry / keystate_phase). keystate stays a
     current-frame singleton: it is NOT added to `action_sequence_keys`, so it is never windowed.
     """
 
@@ -466,7 +466,7 @@ _CONFIGS = [
                     "prompt": "prompt",
                     "keystate": {
                         "next_checkpoint_type": "observation.keystate.next_checkpoint_type",
-                        "h_ckpt": "observation.keystate.h_ckpt",
+                        "h_entry": "observation.keystate.h_entry",
                         "semantic_phase": "observation.keystate.semantic_phase",
                     },
                 })

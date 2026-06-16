@@ -117,14 +117,14 @@ def create_empty_dataset(
     if has_keystate:
         # KeyState supervision labels (Stage 1). Per-frame scalars/vector, NOT windowed:
         # the model reads only the current frame (they are never in action_sequence_keys).
-        # next_checkpoint_type / h_ckpt are kept integer so the -1 (=invalid) sentinel in
-        # h_ckpt survives intact through the pipeline.
+        # next_checkpoint_type / h_entry are kept integer so the -1 (=invalid) sentinel in
+        # h_entry survives intact through the pipeline.
         features["observation.keystate.next_checkpoint_type"] = {
             "dtype": "int64",
             "shape": (1, ),
             "names": None,
         }
-        features["observation.keystate.h_ckpt"] = {
+        features["observation.keystate.h_entry"] = {
             "dtype": "int64",
             "shape": (1, ),
             "names": None,
@@ -219,11 +219,11 @@ def load_raw_episode_data(
 
         keystate = None
         if "/observations/keystate/next_checkpoint_type" in ep:
-            # keep integer labels exact (esp. h_ckpt's -1 = invalid sentinel); phase is multi-label float.
+            # keep integer labels exact (esp. h_entry's -1 = invalid sentinel); phase is multi-label float.
             keystate = {
                 "next_checkpoint_type": torch.from_numpy(
                     ep["/observations/keystate/next_checkpoint_type"][:].astype(np.int64)),
-                "h_ckpt": torch.from_numpy(ep["/observations/keystate/h_ckpt"][:].astype(np.int64)),
+                "h_entry": torch.from_numpy(ep["/observations/keystate/h_entry"][:].astype(np.int64)),
                 "semantic_phase": torch.from_numpy(
                     ep["/observations/keystate/semantic_phase"][:].astype(np.float32)),
             }
@@ -279,7 +279,7 @@ def populate_dataset(
             if keystate is not None:
                 # reshape scalars to (1,) to match the registered feature shapes; phase is already (3,).
                 frame["observation.keystate.next_checkpoint_type"] = keystate["next_checkpoint_type"][i].reshape(1)
-                frame["observation.keystate.h_ckpt"] = keystate["h_ckpt"][i].reshape(1)
+                frame["observation.keystate.h_entry"] = keystate["h_entry"][i].reshape(1)
                 frame["observation.keystate.semantic_phase"] = keystate["semantic_phase"][i]
             dataset.add_frame(frame)
         dataset.save_episode()

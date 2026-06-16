@@ -27,15 +27,15 @@ def load_hdf5(dataset_path):
         for cam_name in root[f"/observation/"].keys():
             image_dict[cam_name] = root[f"/observation/{cam_name}/rgb"][()]
 
-        # KeyState labels (written by envs/utils/keystate_labeler.py v2+). Per-frame, aligned to
-        # the rgb / endpose frames. Absent for data labeled before Stage 1 -> keystate stays None.
+        # KeyState labels (written by envs/utils/keystate_labeler.py v3+). Per-frame, aligned to
+        # the rgb / endpose frames. Absent for unlabeled data -> keystate stays None.
         keystate = None
         if "keystate" in root and "next_checkpoint_type" in root["keystate"]:
             ks = root["keystate"]
             keystate = {
                 "next_checkpoint_type": ks["next_checkpoint_type"][()],  # dense, int8 (T,)
-                "h_ckpt": ks["h_ckpt"][()],                              # int32 (T,), -1 = invalid
-                "semantic_phase": ks["semantic_phase"][()],             # uint8 (T, 3)
+                "h_entry": ks["h_entry"][()],                            # int32 (T,), -1 = no next/current window
+                "semantic_phase": ks["semantic_phase"][()],              # uint8 (T, 3)
             }
 
     return left_gripper, left_arm, right_gripper, right_arm, image_dict, keystate
@@ -98,7 +98,7 @@ def data_transform(path, episode_num, save_path):
         right_arm_dim = []
         # KeyState labels collected on the SAME frames as qpos/images (j != last) so they stay aligned.
         # Stays empty when the source hdf5 has no /keystate (keystate is None) -> nothing written below.
-        ks_next_type, ks_h_ckpt, ks_phase = [], [], []
+        ks_next_type, ks_h_entry, ks_phase = [], [], []
 
         last_state = None
         for j in range(0, left_gripper_all.shape[0]):
@@ -133,9 +133,9 @@ def data_transform(path, episode_num, save_path):
                 cam_left_wrist.append(camera_left_wrist_resized)
 
                 if keystate is not None:
-                    # per-step KeyState labels for frame j (h_ckpt keeps its -1 = invalid sentinel; do NOT clip)
+                    # per-step KeyState labels for frame j (h_entry keeps its -1 = invalid sentinel; do NOT clip)
                     ks_next_type.append(keystate["next_checkpoint_type"][j])
-                    ks_h_ckpt.append(keystate["h_ckpt"][j])
+                    ks_h_entry.append(keystate["h_entry"][j])
                     ks_phase.append(keystate["semantic_phase"][j])
 
             if j != 0:
@@ -161,11 +161,11 @@ def data_transform(path, episode_num, save_path):
             image.create_dataset("cam_left_wrist", data=cam_left_wrist_enc, dtype=f"S{len_left}")
 
             # KeyState labels (Stage 1). Only written when the source hdf5 carried /keystate. dtypes
-            # match the labeler: type int8, h_ckpt int32 (-1 sentinel preserved), phase uint8 [N,3].
+            # match the labeler: type int8, h_entry int32 (-1 sentinel preserved), phase uint8 [N,3].
             if keystate is not None:
                 ks_grp = obs.create_group("keystate")
                 ks_grp.create_dataset("next_checkpoint_type", data=np.array(ks_next_type, dtype=np.int8))
-                ks_grp.create_dataset("h_ckpt", data=np.array(ks_h_ckpt, dtype=np.int32))
+                ks_grp.create_dataset("h_entry", data=np.array(ks_h_entry, dtype=np.int32))
                 ks_grp.create_dataset("semantic_phase", data=np.array(ks_phase, dtype=np.uint8))
 
         begin += 1

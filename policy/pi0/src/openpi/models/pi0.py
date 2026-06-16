@@ -367,7 +367,7 @@ class Pi0(_model.BaseModel):
         so train.py's `sum(ks_losses.values())` is a no-op and behaviour is unchanged."""
         ks_losses: dict[str, at.Array] = {}
         need_ks = self._ks.use_checkpoint_head or self._ks.use_phase_head
-        if not need_ks or obs.keystate_h is None:  # None => baseline / fake data: skip entirely
+        if not need_ks or obs.keystate_h_entry is None:  # None => baseline / fake data: skip entirely
             return ks_losses
 
         # masked-mean pool over the prefix (VLM) tokens -> [b, pg_w]
@@ -379,7 +379,7 @@ class Pi0(_model.BaseModel):
         #     model must learn to say "no next checkpoint" instead of freely predicting 1/2.
         #   * horizon is meaningful only when a future/current checkpoint target exists.
         type_valid_b = obs.keystate_type >= 0
-        h_valid_b = obs.keystate_h >= 0  # [b] bool
+        h_valid_b = obs.keystate_h_entry >= 0  # [b] bool
 
         def masked_mean(per_sample, mask):
             mask = mask.astype(jnp.float32)
@@ -392,7 +392,7 @@ class Pi0(_model.BaseModel):
             type_ce = _softmax_xent(self.ks_type_head(pooled), type_label)
             ks_losses["loss_type"] = self._ks.lambda_type * masked_mean(type_ce, type_valid_b)
 
-            h_label = jnp.where(h_valid_b, obs.keystate_h, 0)  # bucket index 0..5; safe 0 for invalid
+            h_label = jnp.where(h_valid_b, obs.keystate_h_entry, 0)  # bucket index 0..5; safe 0 for invalid
             h_logits = self.ks_horizon_head(pooled)
             if self._ks.horizon_loss_type == "ce":
                 h_loss = _softmax_xent(h_logits, h_label)
@@ -403,7 +403,7 @@ class Pi0(_model.BaseModel):
             h_weight = jnp.where(h_label == 0, self._ks.horizon_bin0_weight, h_weight)
             h_weight = jnp.where(h_label == 1, self._ks.horizon_bin1_weight, h_weight)
             h_mask = h_valid_b.astype(jnp.float32) * h_weight
-            ks_losses["loss_h"] = self._ks.lambda_h * masked_mean(h_loss, h_mask)
+            ks_losses["loss_h_entry"] = self._ks.lambda_h * masked_mean(h_loss, h_mask)
 
         if self._ks.use_phase_head:
             # phase is well-defined on every frame -> no valid mask, plain batch-mean.
