@@ -123,6 +123,10 @@ class Pi0Config(_model.BaseModelConfig):
     # num_horizon_bins = len(horizon_upper_edges) + 1 = 6
     horizon_upper_edges: tuple[int, ...] = (3, 6, 11, 21, 51)
     horizon_loss_type: str = "ce"  # "ce" (default, simple to debug) | "ordinal" (CORAL, ablation)
+    # Extra per-sample weight for near-checkpoint horizon bins. These bins are sparse but important for
+    # entering checkpoint windows safely; default 1.0 preserves baseline loss scaling.
+    horizon_bin0_weight: float = 1.0
+    horizon_bin1_weight: float = 1.0
 
     def __post_init__(self):
         # Hard gates: z head (Stage 2) and KeyState->Action fusion (Stage 3) are scaffolded
@@ -395,7 +399,11 @@ class Pi0(_model.BaseModel):
             else:  # "ordinal" (CORAL)
                 n_bins = len(self._ks.horizon_upper_edges) + 1
                 h_loss = _coral_loss(h_logits, h_label, n_bins)
-            ks_losses["loss_h"] = self._ks.lambda_h * masked_mean(h_loss, h_valid_b)
+            h_weight = jnp.ones_like(h_loss)
+            h_weight = jnp.where(h_label == 0, self._ks.horizon_bin0_weight, h_weight)
+            h_weight = jnp.where(h_label == 1, self._ks.horizon_bin1_weight, h_weight)
+            h_mask = h_valid_b.astype(jnp.float32) * h_weight
+            ks_losses["loss_h"] = self._ks.lambda_h * masked_mean(h_loss, h_mask)
 
         if self._ks.use_phase_head:
             # phase is well-defined on every frame -> no valid mask, plain batch-mean.

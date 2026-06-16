@@ -448,6 +448,8 @@ _CONFIGS = [
             lambda_type=0.1,
             lambda_h=0.1,
             lambda_ph=0.1,
+            horizon_bin0_weight=1.25,
+            horizon_bin1_weight=1.10,
         ),
         data=KeyStateAlohaDataConfig(
             repo_id="place_a2b_left_keystate_oneshot",  # 1-episode overfit dataset
