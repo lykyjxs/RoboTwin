@@ -1,20 +1,19 @@
 """
 KeyState Stage 0 visualizer (read-only on the hdf5; only writes new png/mp4 artifacts).
 
-Two outputs per episode, for human spot-checking the labels produced by
-envs/utils/keystate_labeler.py:
+Two outputs per episode, for human spot-checking the checkpoint-window labels produced by
+`envs/utils/keystate_labeler.py`:
 
   1. Curve plot (keystate/plots/episode{N}.png):
-       active-arm gripper value, object z, EE speed, object z-speed on a shared frame
-       axis, with a GREEN vline at pre_grasp_idx, ORANGE vline at pre_place_idx, and
-       shaded spans for object_in_hand / lifted / placed_and_released.
+       active-arm gripper value, object z, EE speed, `next_checkpoint_type`, and `h_entry`,
+       with shaded pre_grasp/pre_place checkpoint windows plus semantic phases.
   2. Annotated mp4 (keystate/video_annot/episode{N}.mp4):
-       head_camera frames with a text banner of currently-active phases and a highlight
-       box on the two checkpoint frames. Frame t of the video == label t (1:1).
+       head_camera frames with a text banner of current type/h_entry/phases and a border
+       while inside a checkpoint window. Frame t of the video == label t (1:1).
 
 Usage:
-    python -m envs.utils.keystate_visualize --task place_a2b_left --config demo_clean --all
-    python -m envs.utils.keystate_visualize --task place_a2b_left --config demo_clean --episode 0 --no-video
+    python envs/utils/keystate_visualize.py --task place_a2b_left --config demo_clean --all
+    python envs/utils/keystate_visualize.py --task place_a2b_left --config demo_clean --episode 0 --no-video
 """
 import argparse
 import json
@@ -46,6 +45,9 @@ images_to_video = _load_sibling("_ks_i2v", "images_to_video.py").images_to_video
 parse_img_array = _load_sibling("_ks_parse", "parse_hdf5.py").parse_img_array
 
 DT = 15.0 / 250.0
+TYPE_NAMES = {0: "none", 1: "pre_grasp", 2: "pre_place"}
+TYPE_COLORS = {1: "tab:green", 2: "tab:orange"}
+TYPE_BGR = {1: (0, 255, 0), 2: (0, 165, 255)}
 
 
 def _load(hdf5_path):
@@ -53,12 +55,19 @@ def _load(hdf5_path):
         if "keystate" not in f:
             raise KeyError(f"{hdf5_path} has no /keystate group -- run keystate_labeler first.")
         ks = f["keystate"]
+        required = ["next_checkpoint_type", "h_entry", "semantic_phase"]
+        missing = [k for k in required if k not in ks]
+        if missing:
+            raise KeyError(f"{hdf5_path} /keystate missing v3 fields: {missing}")
         attrs = dict(ks.attrs)
+        sem = ks["semantic_phase"][()]
         d = {
-            "checkpoint_type": ks["checkpoint_type"][()],
-            "object_in_hand": ks["object_in_hand"][()],
-            "lifted": ks["lifted"][()],
-            "placed_and_released": ks["placed_and_released"][()],
+            "next_checkpoint_type": ks["next_checkpoint_type"][()],
+            "h_entry": ks["h_entry"][()],
+            "object_in_hand": ks["object_in_hand"][()] if "object_in_hand" in ks else sem[:, 0],
+            "lifted": ks["lifted"][()] if "lifted" in ks else sem[:, 1],
+            "placed_and_released": ks["placed_and_released"][()] if "placed_and_released" in ks else sem[:, 2],
+            "semantic_phase": sem,
             "attrs": attrs,
             "left_endpose": f["/endpose/left_endpose"][()],
             "right_endpose": f["/endpose/right_endpose"][()],
@@ -78,7 +87,7 @@ def _ee_speed(endpose):
     return sp
 
 
-def _span(ax, mask, color, label):
+def _span(ax, mask, color, label, alpha=0.15):
     """Shade contiguous regions where mask==1."""
     on = np.asarray(mask).astype(bool)
     if not on.any():
@@ -89,11 +98,20 @@ def _span(ax, mask, color, label):
     first = True
     for i in idx[1:]:
         if i != prev + 1:
-            ax.axvspan(start, prev, color=color, alpha=0.15, label=label if first else None)
+            ax.axvspan(start, prev, color=color, alpha=alpha, label=label if first else None)
             first = False
             start = i
         prev = i
-    ax.axvspan(start, prev, color=color, alpha=0.15, label=label if first else None)
+    ax.axvspan(start, prev, color=color, alpha=alpha, label=label if first else None)
+
+
+def _window_mask(d, typ):
+    return (d["next_checkpoint_type"] == typ) & (d["h_entry"] == 0)
+
+
+def _shade_windows(ax, d):
+    _span(ax, _window_mask(d, 1), TYPE_COLORS[1], "pre_grasp window", alpha=0.20)
+    _span(ax, _window_mask(d, 2), TYPE_COLORS[2], "pre_place window", alpha=0.20)
 
 
 def plot_curves(d, out_path, ep):
@@ -105,16 +123,17 @@ def plot_curves(d, out_path, ep):
     T = len(g)
     x = np.arange(T)
 
-    fig, axes = plt.subplots(3, 1, figsize=(11, 8), sharex=True)
+    fig, axes = plt.subplots(5, 1, figsize=(12, 11), sharex=True)
 
     ax = axes[0]
     ax.plot(x, g, "b-", label=f"{arm} gripper")
     ax.axhline(0.8, color="gray", ls="--", lw=0.8)
     ax.axhline(0.2, color="gray", ls="--", lw=0.8)
     ax.set_ylabel("gripper")
-    _span(ax, d["object_in_hand"], "tab:blue", "in-hand")
-    _span(ax, d["lifted"], "tab:green", "lifted")
-    _span(ax, d["placed_and_released"], "tab:red", "released")
+    _shade_windows(ax, d)
+    _span(ax, d["object_in_hand"], "tab:blue", "in-hand", alpha=0.10)
+    _span(ax, d["lifted"], "tab:green", "lifted", alpha=0.08)
+    _span(ax, d["placed_and_released"], "tab:red", "released", alpha=0.10)
     ax.legend(loc="upper right", fontsize=7)
 
     ax = axes[1]
@@ -125,31 +144,51 @@ def plot_curves(d, out_path, ep):
         if rz == rz:  # not nan
             ax.axhline(rz, color="gray", ls=":", lw=0.8)
             ax.axhline(rz + a.get("lift_threshold", 0.03), color="green", ls=":", lw=0.8)
+    _shade_windows(ax, d)
     ax.set_ylabel("object z (m)")
     ax.legend(loc="upper right", fontsize=7)
 
     ax = axes[2]
     ax.plot(x, ee_sp, "c-", label="EE speed (m/s)")
+    _shade_windows(ax, d)
     ax.set_ylabel("EE speed")
+    ax.legend(loc="upper right", fontsize=7)
+
+    ax = axes[3]
+    ax.step(x, d["next_checkpoint_type"], where="post", color="k", label="next_checkpoint_type")
+    _shade_windows(ax, d)
+    ax.set_yticks([0, 1, 2])
+    ax.set_yticklabels(["none", "pre_grasp", "pre_place"])
+    ax.set_ylabel("type")
+    ax.legend(loc="upper right", fontsize=7)
+
+    ax = axes[4]
+    h_plot = d["h_entry"].astype(float)
+    h_plot[h_plot < 0] = np.nan
+    ax.plot(x, h_plot, "r-", label="h_entry")
+    _shade_windows(ax, d)
+    ax.set_ylabel("h_entry")
     ax.set_xlabel("frame")
     ax.legend(loc="upper right", fontsize=7)
 
-    pg = int(a.get("pre_grasp_idx", -1))
-    pp = int(a.get("pre_place_idx", -1))
+    pg_s = int(a.get("pre_grasp_window_start", -1))
+    pg_e = int(a.get("pre_grasp_window_end", -1))
+    pp_s = int(a.get("pre_place_window_start", -1))
+    pp_e = int(a.get("pre_place_window_end", -1))
     for axx in axes:
-        if pg >= 0:
-            axx.axvline(pg, color="green", lw=1.6)
-        if pp >= 0:
-            axx.axvline(pp, color="orange", lw=1.6)
+        for pos, color, ls in [(pg_s, "green", "-"), (pg_e, "green", ":"), (pp_s, "orange", "-"), (pp_e, "orange", ":")]:
+            if pos >= 0:
+                axx.axvline(pos, color=color, lw=1.2, ls=ls)
 
     flags = a.get("flags", "[]")
-    title = f"episode{ep}  arm={arm}  pre_grasp={pg}(green)  pre_place={pp}(orange)"
+    title = (f"episode{ep} arm={arm}  pre_grasp=[{pg_s},{pg_e}] green  "
+             f"pre_place=[{pp_s},{pp_e}] orange")
     if flags and flags != "[]":
         title += f"  FLAGS={flags}"
     fig.suptitle(title, fontsize=10)
     fig.tight_layout(rect=[0, 0, 1, 0.97])
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    fig.savefig(out_path, dpi=110)
+    fig.savefig(out_path, dpi=120)
     plt.close(fig)
 
 
@@ -158,9 +197,7 @@ def annotate_video(d, out_path, ep):
         print(f"[warn] episode{ep}: no head_camera rgb, skip video")
         return
     frames = parse_img_array(d["_rgb_raw"])  # (T,H,W,3) BGR
-    a = d["attrs"]
-    pg = int(a.get("pre_grasp_idx", -1))
-    pp = int(a.get("pre_place_idx", -1))
+    nct, h_entry = d["next_checkpoint_type"], d["h_entry"]
     oih, lif, rel = d["object_in_hand"], d["lifted"], d["placed_and_released"]
     T = len(frames)
 
@@ -168,6 +205,8 @@ def annotate_video(d, out_path, ep):
     for t in range(T):
         img = frames[t].copy()
         h, w = img.shape[:2]
+        typ = int(nct[t]) if t < len(nct) else 0
+        h_val = int(h_entry[t]) if t < len(h_entry) else -1
         phases = []
         if t < len(oih) and oih[t]:
             phases.append("in-hand")
@@ -175,18 +214,16 @@ def annotate_video(d, out_path, ep):
             phases.append("lifted")
         if t < len(rel) and rel[t]:
             phases.append("released")
-        banner = " ".join(phases) if phases else "-"
-        cv2.rectangle(img, (0, 0), (w, 22), (0, 0, 0), -1)
-        cv2.putText(img, f"t={t} {banner}", (4, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                    (255, 255, 255), 1, cv2.LINE_AA)
-        if t == pg:
-            cv2.rectangle(img, (1, 1), (w - 2, h - 2), (0, 255, 0), 4)
-            cv2.putText(img, "PRE-GRASP", (w // 2 - 60, h - 12), cv2.FONT_HERSHEY_SIMPLEX,
-                        0.7, (0, 255, 0), 2, cv2.LINE_AA)
-        if t == pp:
-            cv2.rectangle(img, (1, 1), (w - 2, h - 2), (0, 165, 255), 4)
-            cv2.putText(img, "PRE-PLACE", (w // 2 - 60, h - 12), cv2.FONT_HERSHEY_SIMPLEX,
-                        0.7, (0, 165, 255), 2, cv2.LINE_AA)
+        phase_text = "|".join(phases) if phases else "-"
+        banner = f"t={t} type={TYPE_NAMES.get(typ, typ)} h_entry={h_val} phase={phase_text}"
+        cv2.rectangle(img, (0, 0), (w, 26), (0, 0, 0), -1)
+        cv2.putText(img, banner, (4, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+
+        if typ in TYPE_BGR and h_val == 0:
+            color = TYPE_BGR[typ]
+            cv2.rectangle(img, (1, 1), (w - 2, h - 2), color, 4)
+            cv2.putText(img, f"{TYPE_NAMES[typ].upper()} WINDOW", (w // 2 - 120, h - 12),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2, cv2.LINE_AA)
         out.append(img)
 
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
