@@ -1,14 +1,14 @@
 """
 KeyState Stage 0 self-inspection tool (read-only).
 
-For manually checking the quality of the keystate labels produced by
-keystate_labeler.py. Prints a per-episode table and a summary, and runs
-sanity assertions. Also cross-checks the detected arm against scene_info.json's
-{a} field (the arm the demo script actually used).
+For manually checking the quality of the checkpoint-window labels produced by
+keystate_labeler.py. Prints a per-episode table and a summary, and runs sanity
+assertions. Also cross-checks the detected arm against scene_info.json's {a} field
+(the arm the demo script actually used).
 
 Usage:
     python envs/utils/keystate_inspect.py --task place_a2b_left --config demo_clean
-    python envs/utils/keystate_inspect.py --task place_a2b_left --config demo_clean --episode 0   # one episode, verbose
+    python envs/utils/keystate_inspect.py --task place_a2b_left --config demo_clean --episode 0
 """
 import argparse
 import json
@@ -23,15 +23,18 @@ def load_keystate(hdf5_path):
         if "keystate" not in f:
             raise KeyError(f"{hdf5_path} has no /keystate group (run keystate_labeler first)")
         ks = f["keystate"]
+        required = ["next_checkpoint_type", "h_entry", "semantic_phase"]
+        missing = [k for k in required if k not in ks]
+        if missing:
+            raise KeyError(f"{hdf5_path} /keystate missing v3 fields: {missing}")
         a = dict(ks.attrs)
         d = {
-            "checkpoint_type": ks["checkpoint_type"][()],
-            # dense next_checkpoint_type (labeler v2+); fall back gracefully if labeling is stale
-            "next_checkpoint_type": ks["next_checkpoint_type"][()] if "next_checkpoint_type" in ks else None,
-            "h_ckpt": ks["h_ckpt"][()],
-            "object_in_hand": ks["object_in_hand"][()],
-            "lifted": ks["lifted"][()],
-            "placed_and_released": ks["placed_and_released"][()],
+            "next_checkpoint_type": ks["next_checkpoint_type"][()],
+            "h_entry": ks["h_entry"][()],
+            "object_in_hand": ks["object_in_hand"][()] if "object_in_hand" in ks else ks["semantic_phase"][:, 0],
+            "lifted": ks["lifted"][()] if "lifted" in ks else ks["semantic_phase"][:, 1],
+            "placed_and_released": ks["placed_and_released"][()]
+            if "placed_and_released" in ks else ks["semantic_phase"][:, 2],
             "semantic_phase": ks["semantic_phase"][()],
             "attrs": a,
         }
@@ -42,12 +45,20 @@ def load_keystate(hdf5_path):
     return d
 
 
+def _attr_int(attrs, key):
+    return int(attrs[key]) if key in attrs else -1
+
+
 def check_episode(ep, hdf5_path, scene_info):
     d = load_keystate(hdf5_path)
     a = d["attrs"]
     T = int(a["T"])
-    pg = int(a["pre_grasp_idx"])
-    pp = int(a["pre_place_idx"])
+    pg = _attr_int(a, "pre_grasp_idx")
+    pp = _attr_int(a, "pre_place_idx")
+    pg_s = _attr_int(a, "pre_grasp_window_start")
+    pg_e = _attr_int(a, "pre_grasp_window_end")
+    pp_s = _attr_int(a, "pre_place_window_start")
+    pp_e = _attr_int(a, "pre_place_window_end")
     flags = a.get("flags", "[]")
     if isinstance(flags, str):
         flags = json.loads(flags)
@@ -56,11 +67,12 @@ def check_episode(ep, hdf5_path, scene_info):
 
     # 1. frame alignment: every per-step array must have the same length T
     lengths = {
-        "checkpoint_type": len(d["checkpoint_type"]),
-        "h_ckpt": len(d["h_ckpt"]),
+        "next_checkpoint_type": len(d["next_checkpoint_type"]),
+        "h_entry": len(d["h_entry"]),
         "object_in_hand": len(d["object_in_hand"]),
         "lifted": len(d["lifted"]),
         "placed_and_released": len(d["placed_and_released"]),
+        "semantic_phase": len(d["semantic_phase"]),
         "endpose": d["T_endpose"],
     }
     if d["T_rgb"] is not None:
@@ -68,21 +80,27 @@ def check_episode(ep, hdf5_path, scene_info):
     if len(set(lengths.values())) != 1:
         problems.append(f"FRAME MISALIGN: {lengths}")
 
-    # 2. ordering: pre_grasp < pre_place
+    # 2. ordering: pre_grasp < pre_place and window start/end are sane.
     if pg >= 0 and pp >= 0 and not (pg < pp):
         problems.append(f"pre_grasp({pg}) >= pre_place({pp})")
+    if pg_s >= 0 and pg_e >= 0 and not (pg_s <= pg_e):
+        problems.append(f"pre_grasp_window start({pg_s}) > end({pg_e})")
+    if pp_s >= 0 and pp_e >= 0 and not (pp_s <= pp_e):
+        problems.append(f"pre_place_window start({pp_s}) > end({pp_e})")
+    if pg_e >= 0 and pp_s >= 0 and not (pg_e < pp_s):
+        problems.append(f"pre_grasp_window overlaps pre_place_window ({pg_e} >= {pp_s})")
 
-    # 3. phase starts are after the corresponding checkpoint
+    # 3. phase starts are after or at the corresponding window entry.
     oih = np.nonzero(d["object_in_hand"])[0]
     lif = np.nonzero(d["lifted"])[0]
     rel = np.nonzero(d["placed_and_released"])[0]
     oih_start = int(oih.min()) if oih.size else -1
     lif_start = int(lif.min()) if lif.size else -1
     rel_start = int(rel.min()) if rel.size else -1
-    if pg >= 0 and oih_start >= 0 and not (pg < oih_start):
-        problems.append(f"pre_grasp({pg}) not before in-hand start({oih_start})")
-    if pp >= 0 and rel_start >= 0 and not (pp < rel_start):
-        problems.append(f"pre_place({pp}) not before released start({rel_start})")
+    if pg_s >= 0 and oih_start >= 0 and not (pg_s <= oih_start):
+        problems.append(f"pre_grasp_window_start({pg_s}) after in-hand start({oih_start})")
+    if pp_s >= 0 and rel_start >= 0 and not (pp_s <= rel_start):
+        problems.append(f"pre_place_window_start({pp_s}) after released start({rel_start})")
 
     # 4. lifted should overlap object_in_hand (you can't lift what you're not holding)
     if oih.size and lif.size:
@@ -90,42 +108,38 @@ def check_episode(ep, hdf5_path, scene_info):
         if not overlap:
             problems.append("lifted does not overlap object_in_hand")
 
-    # 5. h_ckpt sanity: 0 at each checkpoint frame
-    if pg >= 0 and d["h_ckpt"][pg] != 0:
-        problems.append(f"h_ckpt at pre_grasp != 0 (={d['h_ckpt'][pg]})")
-    if pp >= 0 and d["h_ckpt"][pp] != 0:
-        problems.append(f"h_ckpt at pre_place != 0 (={d['h_ckpt'][pp]})")
-
-    # 6. checkpoint_type codes correct
-    if pg >= 0 and d["checkpoint_type"][pg] != 1:
-        problems.append("checkpoint_type at pre_grasp != 1")
-    if pp >= 0 and d["checkpoint_type"][pp] != 2:
-        problems.append("checkpoint_type at pre_place != 2")
-
-    # 9. dense next_checkpoint_type consistency (labeler v2+):
-    #    valid frames (h_ckpt>=0) must have type in {1,2}; invalid frames (h_ckpt<0) must have type 0.
-    #    Also the dense type must equal the type of the nearest future checkpoint (== checkpoint_type[nxt]).
     nct = d["next_checkpoint_type"]
-    if nct is not None:
-        h = d["h_ckpt"]
-        valid = h >= 0
-        if not np.all(np.isin(nct[valid], (1, 2))):
-            problems.append(f"next_checkpoint_type on valid frames not in {{1,2}} (got {set(nct[valid].tolist())})")
-        if np.any(nct[~valid] != 0):
-            problems.append("next_checkpoint_type on invalid (h<0) frames != 0")
-        # past pre_grasp but before pre_place -> next target is pre_place -> type must be 2 (not 1)
-        if pg >= 0 and pp >= 0:
-            mid = np.arange(T)
-            mid_mask = (mid > pg) & (mid <= pp)
-            if mid_mask.any() and np.any(nct[mid_mask] != 2):
-                problems.append("next_checkpoint_type between pre_grasp and pre_place != 2")
-            before_mask = (mid <= pg)
-            if before_mask.any() and np.any(nct[before_mask] != 1):
-                problems.append("next_checkpoint_type up to pre_grasp != 1")
-    else:
-        problems.append("next_checkpoint_type missing (stale labeler < v2; re-run keystate_labeler)")
+    h = d["h_entry"]
 
-    # 7. object actually rises (cross-check lifted against object z)
+    # 5. h_entry sanity and dense type consistency.
+    if pg_s >= 0:
+        if h[pg_s] != 0 or nct[pg_s] != 1:
+            problems.append(f"pre_grasp entry labels wrong: type={nct[pg_s]} h_entry={h[pg_s]}")
+    if pg_s >= 0 and pg_e >= 0:
+        window = np.arange(pg_s, pg_e + 1)
+        if np.any(nct[window] != 1) or np.any(h[window] != 0):
+            problems.append("pre_grasp window not labeled type=1,h_entry=0 throughout")
+    if pp_s >= 0:
+        if h[pp_s] != 0 or nct[pp_s] != 2:
+            problems.append(f"pre_place entry labels wrong: type={nct[pp_s]} h_entry={h[pp_s]}")
+    if pp_s >= 0 and pp_e >= 0:
+        window = np.arange(pp_s, pp_e + 1)
+        if np.any(nct[window] != 2) or np.any(h[window] != 0):
+            problems.append("pre_place window not labeled type=2,h_entry=0 throughout")
+    if pg_s >= 0:
+        before = np.arange(0, pg_s)
+        if before.size and (np.any(nct[before] != 1) or np.any(h[before] != (pg_s - before))):
+            problems.append("frames before pre_grasp do not point to pre_grasp window entry")
+    if pg_e >= 0 and pp_s >= 0:
+        mid = np.arange(pg_e + 1, pp_s)
+        if mid.size and (np.any(nct[mid] != 2) or np.any(h[mid] != (pp_s - mid))):
+            problems.append("frames between windows do not point to pre_place window entry")
+    if pp_e >= 0 and pp_e + 1 < T:
+        tail = np.arange(pp_e + 1, T)
+        if np.any(nct[tail] != 0) or np.any(h[tail] != -1):
+            problems.append("terminal frames after pre_place window are not type=0,h_entry=-1")
+
+    # 6. object actually rises (cross-check lifted against object z)
     z_note = ""
     if d["obj_z"] is not None:
         rise = float(d["obj_z"].max() - a.get("resting_z", d["obj_z"].min()))
@@ -133,7 +147,7 @@ def check_episode(ep, hdf5_path, scene_info):
         if lif.size and rise < a.get("lift_threshold", 0.03):
             problems.append(f"lifted set but object z barely rose ({rise:.3f})")
 
-    # 8. arm cross-check vs scene_info {a}
+    # 7. arm cross-check vs scene_info {a}
     arm = a.get("arm", "?")
     scene_arm = scene_info.get(f"episode_{ep}", {}).get("info", {}).get("{a}")
     arm_match = "" if (scene_arm is None or scene_arm == arm) else f"ARM MISMATCH(scene={scene_arm})"
@@ -141,9 +155,21 @@ def check_episode(ep, hdf5_path, scene_info):
         problems.append(arm_match)
 
     return {
-        "ep": ep, "arm": arm, "T": T, "pg": pg, "pp": pp,
-        "oih": oih_start, "lif": lif_start, "rel": rel_start,
-        "flags": flags, "z_note": z_note, "problems": problems,
+        "ep": ep,
+        "arm": arm,
+        "T": T,
+        "pg": pg,
+        "pp": pp,
+        "pg_s": pg_s,
+        "pg_e": pg_e,
+        "pp_s": pp_s,
+        "pp_e": pp_e,
+        "oih": oih_start,
+        "lif": lif_start,
+        "rel": rel_start,
+        "flags": flags,
+        "z_note": z_note,
+        "problems": problems,
     }
 
 
@@ -168,9 +194,9 @@ def main():
             for fn in os.listdir(data_dir)
             if fn.startswith("episode") and fn.endswith(".hdf5"))
 
-    print(f"{'ep':>3} {'arm':>5} {'T':>4} {'pre_grasp':>9} {'pre_place':>9} "
+    print(f"{'ep':>3} {'arm':>5} {'T':>4} {'pg_win':>13} {'pp_win':>13} "
           f"{'in-hand':>8} {'lifted':>7} {'released':>8} {'z_rise':>9}  status")
-    print("-" * 90)
+    print("-" * 105)
     bad = []
     for ep in eps:
         hdf5_path = os.path.join(data_dir, f"episode{ep}.hdf5")
@@ -182,12 +208,13 @@ def main():
             continue
         status = "OK" if not r["problems"] else "!! " + "; ".join(r["problems"])
         zr = r["z_note"].replace("z_rise=", "") if r["z_note"] else "-"
-        print(f"{r['ep']:>3} {r['arm']:>5} {r['T']:>4} {r['pg']:>9} {r['pp']:>9} "
-              f"{r['oih']:>8} {r['lif']:>7} {r['rel']:>8} {zr:>9}  {status}")
+        print(f"{r['ep']:>3} {r['arm']:>5} {r['T']:>4} [{r['pg_s']:>3},{r['pg_e']:<3}]      "
+              f"[{r['pp_s']:>3},{r['pp_e']:<3}]      {r['oih']:>8} {r['lif']:>7} {r['rel']:>8} "
+              f"{zr:>9}  {status}")
         if r["problems"]:
             bad.append(ep)
 
-    print("-" * 90)
+    print("-" * 105)
     print(f"Total {len(eps)} episodes. Clean: {len(eps) - len(bad)}. Problematic: {len(bad)}"
           + (f"  -> {bad}" if bad else "  ✅ all good"))
 
@@ -195,16 +222,18 @@ def main():
         # verbose dump of the per-step arrays for the single episode
         ep = args.episode
         d = load_keystate(os.path.join(data_dir, f"episode{ep}.hdf5"))
-        print(f"\n=== per-step arrays for episode{ep} (frame: ct/h/oih/lif/rel) ===")
-        ct, h = d["checkpoint_type"], d["h_ckpt"]
+        print(f"\n=== per-step arrays for episode{ep} (frame: type/h_entry/oih/lif/rel) ===")
+        nct, h = d["next_checkpoint_type"], d["h_entry"]
         oih, lif, rel = d["object_in_hand"], d["lifted"], d["placed_and_released"]
-        for t in range(len(ct)):
+        for t in range(len(nct)):
             mark = ""
-            if ct[t] == 1:
-                mark = "  <-- PRE-GRASP"
-            elif ct[t] == 2:
-                mark = "  <-- PRE-PLACE"
-            print(f"  t={t:>3}: ct={ct[t]} h={h[t]:>3} oih={oih[t]} lif={lif[t]} rel={rel[t]}{mark}")
+            if nct[t] == 1 and h[t] == 0:
+                mark = "  <-- PRE-GRASP WINDOW"
+            elif nct[t] == 2 and h[t] == 0:
+                mark = "  <-- PRE-PLACE WINDOW"
+            elif nct[t] == 0:
+                mark = "  <-- NONE"
+            print(f"  t={t:>3}: type={nct[t]} h_entry={h[t]:>3} oih={oih[t]} lif={lif[t]} rel={rel[t]}{mark}")
 
 
 if __name__ == "__main__":

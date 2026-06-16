@@ -3,27 +3,29 @@ KeyState Stage 0 offline labeler.
 
 Reads the per-frame substep tags that were passively logged during data collection
 (see envs/_base_task.py: move(stage_tag=...) -> get_obs() -> /keystate_substep/*),
-and derives the 5 keystates by looking up a FIXED semantic mapping table -- no
-human/VLM observation, no thresholds for the phase boundaries.
+and derives checkpoint-window labels by looking up a FIXED semantic mapping table --
+no human/VLM observation, no thresholds for the checkpoint windows.
 
 For place_a2b_left, play_once() always emits this fixed sequence of Actions:
     move(grasp_actor)          -> [move(pre_grasp), move(grasp), close]   stage="grasp"
     move(move_by_displacement) -> [move(lift)]                           stage="lift"
     move(place_actor)          -> [move(place_pre), move(place), open]   stage="place"
 
-Fixed mapping (stage, sub_index, action_type) -> keystate:
-    (grasp, 1, move)          -> end frame = pre-grasp checkpoint
-    (grasp, 3, gripper_close) -> from its end: object-in-hand = 1
-    (lift,  1, move)          -> from its end: lifted = 1
-    (place, 1, move)          -> end frame = pre-place checkpoint
-    (place, 3, gripper_open)  -> from its end: placed-and-released = 1
+Window mapping:
+    pre_grasp window: old pre_grasp frame -> grasp confirmed / object-in-hand frame
+    pre_place window: old pre_place frame -> released / placed-and-released frame
 
 Output: writes a /keystate group back into each episode hdf5 (idempotent) plus a
 JSON sidecar at <data_root>/<task>/<config>/keystate/episode{N}.json.
 
+Canonical Stage 1 supervision fields:
+    next_checkpoint_type  int8  (T,)    0=none / 1=pre_grasp_window / 2=pre_place_window
+    h_entry               int32 (T,)    distance to checkpoint-window entry; 0 inside window; -1=no next/current window
+    semantic_phase        uint8 (T,3)   object_in_hand / lifted / placed_and_released
+
 Usage:
-    python -m envs.utils.keystate_labeler --task place_a2b_left --config demo_clean --all
-    python -m envs.utils.keystate_labeler --task place_a2b_left --config demo_clean --episode 0
+    python envs/utils/keystate_labeler.py --task place_a2b_left --config demo_clean --all
+    python envs/utils/keystate_labeler.py --task place_a2b_left --config demo_clean --episode 0
 """
 import argparse
 import json
@@ -32,7 +34,7 @@ import os
 import h5py
 import numpy as np
 
-LABELER_VERSION = 2  # v2: add dense next_checkpoint_type (Stage 1 supervision target)
+LABELER_VERSION = 3  # v3: checkpoint windows + h_entry; no h_ckpt/checkpoint_type compatibility fields
 
 # Inverse of Base_Task.KEYSTATE_*_CODES (kept in sync with envs/_base_task.py).
 STAGE_DECODE = {0: None, 1: "grasp", 2: "lift", 3: "place"}
@@ -83,12 +85,19 @@ def _segment_end_frame(stage_codes, action_codes, sub_indices, stage_name, sub_i
     return int(idx[-1]) if idx.size else -1
 
 
-def _segment_first_frame(stage_codes, action_codes, sub_indices, stage_name, sub_index, action_name):
-    stage_c = next(k for k, v in STAGE_DECODE.items() if v == stage_name)
-    action_c = next(k for k, v in ACTION_DECODE.items() if v == action_name)
-    mask = (stage_codes == stage_c) & (action_codes == action_c) & (sub_indices == sub_index)
-    idx = np.nonzero(mask)[0]
-    return int(idx[0]) if idx.size else -1
+def _fill_window_targets(next_checkpoint_type, h_entry, window_start, window_end, window_type, flags, name):
+    if window_start < 0 or window_end < 0:
+        return
+    if window_end < window_start:
+        flags.append(f"{name}_window_end_before_start")
+        return
+    # Before the window, target the entry. Inside the window, h_entry=0 and the type remains active.
+    for t in range(window_start + 1):
+        if next_checkpoint_type[t] == 0:
+            next_checkpoint_type[t] = window_type
+            h_entry[t] = window_start - t
+    next_checkpoint_type[window_start:window_end + 1] = window_type
+    h_entry[window_start:window_end + 1] = 0
 
 
 def label_episode(data):
@@ -106,7 +115,7 @@ def label_episode(data):
         arm = None
         flags.append("no_arm_in_substep")
 
-    # checkpoints (single frames) = end of the first move in grasp / place
+    # Old point checkpoints = end of the first move in grasp/place. Window entry starts here.
     pre_grasp_idx = _segment_end_frame(sc, ac, si, "grasp", 1, "move")
     pre_place_idx = _segment_end_frame(sc, ac, si, "place", 1, "move")
     if pre_grasp_idx < 0:
@@ -114,7 +123,7 @@ def label_episode(data):
     if pre_place_idx < 0:
         flags.append("no_pre_place")
 
-    # phase boundaries (multi-label, 1 from a frame onward)
+    # Confirmation / phase boundaries.
     close_end = _segment_end_frame(sc, ac, si, "grasp", 3, "gripper_close")
     lift_end = _segment_end_frame(sc, ac, si, "lift", 1, "move")
     open_end = _segment_end_frame(sc, ac, si, "place", 3, "gripper_open")
@@ -152,26 +161,25 @@ def label_episode(data):
     else:
         resting_z = float("nan")
 
-    # --- derived supervision fields ---
-    checkpoint_type = np.zeros(T, dtype=np.int8)
-    if pre_grasp_idx >= 0:
-        checkpoint_type[pre_grasp_idx] = 1
-    if pre_place_idx >= 0:
-        checkpoint_type[pre_place_idx] = 2
+    # --- checkpoint-window supervision fields ---
+    # pre_grasp window: old pre_grasp frame -> grasp confirmed / object-in-hand frame.
+    # pre_place window: old pre_place frame -> released / placed-and-released frame.
+    pre_grasp_window_start = pre_grasp_idx
+    pre_grasp_window_end = close_end
+    pre_place_window_start = pre_place_idx
+    pre_place_window_end = open_end
 
-    ckpts = sorted([c for c in (pre_grasp_idx, pre_place_idx) if c >= 0])
-    h_ckpt = np.full(T, -1, dtype=np.int32)
-    # dense next-checkpoint type: type of the nearest *future* checkpoint at each t.
-    # This is what the model is supervised on (sparse `checkpoint_type` above is only the
-    # 2 event frames; the model needs "looking forward from t, what's the next checkpoint").
-    # Strictly co-derived with h_ckpt so the two are always consistent (same `nxt`).
-    # 0 on frames past the last checkpoint (h_ckpt == -1); those are masked out in training.
+    if pre_grasp_window_start >= 0 and pre_grasp_window_end >= 0 and pre_place_window_start >= 0:
+        if pre_grasp_window_end >= pre_place_window_start:
+            flags.append("pre_grasp_window_overlaps_pre_place")
+            pre_grasp_window_end = pre_place_window_start - 1
+
     next_checkpoint_type = np.zeros(T, dtype=np.int8)
-    for t in range(T):
-        nxt = next((c for c in ckpts if c >= t), None)
-        if nxt is not None:
-            h_ckpt[t] = nxt - t
-            next_checkpoint_type[t] = checkpoint_type[nxt]
+    h_entry = np.full(T, -1, dtype=np.int32)
+    _fill_window_targets(next_checkpoint_type, h_entry, pre_grasp_window_start, pre_grasp_window_end, 1, flags,
+                         "pre_grasp")
+    _fill_window_targets(next_checkpoint_type, h_entry, pre_place_window_start, pre_place_window_end, 2, flags,
+                         "pre_place")
 
     semantic_phase = np.stack([object_in_hand, lifted, placed_and_released], axis=1).astype(np.uint8)
 
@@ -180,9 +188,8 @@ def label_episode(data):
         flags.append("checkpoint_order_violation")
 
     labels = {
-        "checkpoint_type": checkpoint_type,
         "next_checkpoint_type": next_checkpoint_type,
-        "h_ckpt": h_ckpt,
+        "h_entry": h_entry,
         "object_in_hand": object_in_hand,
         "lifted": lifted,
         "placed_and_released": placed_and_released,
@@ -190,7 +197,11 @@ def label_episode(data):
         "_attrs": {
             "arm": arm if arm is not None else "unknown",
             "pre_grasp_idx": pre_grasp_idx,
+            "pre_grasp_window_start": pre_grasp_window_start,
+            "pre_grasp_window_end": pre_grasp_window_end,
             "pre_place_idx": pre_place_idx,
+            "pre_place_window_start": pre_place_window_start,
+            "pre_place_window_end": pre_place_window_end,
             "grasp_close_end": close_end,
             "lift_end": lift_end,
             "place_open_end": open_end,
@@ -247,8 +258,9 @@ def process(task, config, data_root, episodes):
             _write_sidecar(os.path.join(sidecar_dir, f"episode{ep}.json"), ep, labels)
             a = labels["_attrs"]
             note = f" FLAGS={flags}" if flags else ""
-            print(f"[ok]   episode{ep}: arm={a['arm']} pre_grasp={a['pre_grasp_idx']} "
-                  f"pre_place={a['pre_place_idx']} T={a['T']}{note}")
+            print(f"[ok]   episode{ep}: arm={a['arm']} pre_grasp=[{a['pre_grasp_window_start']},"
+                  f"{a['pre_grasp_window_end']}] pre_place=[{a['pre_place_window_start']},"
+                  f"{a['pre_place_window_end']}] T={a['T']}{note}")
             summary["ok"] += 1
             if flags:
                 summary["flagged"] += 1

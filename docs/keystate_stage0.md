@@ -84,9 +84,9 @@ place_actor          -> [move(place_pre), move(place), open]    # stage_tag="pla
 
 | 脚本 | 作用 |
 |---|---|
-| `envs/utils/keystate_labeler.py` | 读 `/keystate_substep`，查固定映射表，把标签写回 hdf5 的 `/keystate` 组 + json 摘要 |
+| `envs/utils/keystate_labeler.py` | 读 `/keystate_substep`，查固定映射表，把 checkpoint-window 标签写回 hdf5 的 `/keystate` 组 + json 摘要 |
 | `envs/utils/keystate_visualize.py` | 生成曲线图（gripper/物体z/EE速度 + 竖线）+ 标注叠加视频 |
-| `envs/utils/keystate_inspect.py` | 自查工具：50 条表格 + 8 项断言（帧对齐/顺序/phase重叠/h_ckpt归零/手臂交叉核对等） |
+| `envs/utils/keystate_inspect.py` | 自查工具：50 条表格 + 窗口/帧对齐/phase重叠/`h_entry`/手臂交叉核对等断言 |
 
 > 技术红利：`envs/utils/pkl2hdf5.py` 会**递归**把 pkl 任意字典自动转 HDF5，所以在 `get_obs` 加新键无需改转换器。
 > 注意：键名含子串 `"rgb"` 会被 JPEG 编码（要避开）；叶子必须是 ndarray，否则标量会被静默丢弃。
@@ -95,21 +95,28 @@ place_actor          -> [move(place_pre), move(place), open]    # stage_tag="pla
 
 ## 4. 数据接口（给 Stage 1 用）
 
-每条 `data/place_a2b_left/demo_clean/data/episodeN.hdf5` 含 `/keystate` 组：
+每条 `data/place_a2b_left/demo_clean/data/episodeN.hdf5` 含 `/keystate` 组。
+
+**checkpoint window 定义**：
+
+- `pre_grasp window`：从旧 `pre_grasp` 那一帧开始，到 `object_in_hand / grasp confirmed` 那一帧结束。
+- `pre_place window`：从旧 `pre_place` 那一帧开始，到 `released / placed_and_released` 那一帧结束。
 
 **per-step 数组**（长度 T，与 `/endpose`、`/observation/*/rgb` 帧严格对齐）：
 
 | 字段 | dtype | 含义 |
 |---|---|---|
-| `checkpoint_type` | int8 (T,) | 0=无 / 1=pre_grasp / 2=pre_place |
-| `h_ckpt` | int32 (T,) | 距下一个 checkpoint 还有多少步（= 下一 checkpoint 帧 − t；稠密、单调递减；最后段 -1） |
+| `next_checkpoint_type` | int8 (T,) | 0=none / 1=pre_grasp window / 2=pre_place window；窗口外指向下一个窗口，窗口内保持当前窗口类型 |
+| `h_entry` | int32 (T,) | 距下一个 checkpoint window 入口还有多少步；窗口内为 0；最后无 next/current window 的末段为 -1 |
 | `object_in_hand` | uint8 (T,) | multi-label phase |
 | `lifted` | uint8 (T,) | multi-label phase |
 | `placed_and_released` | uint8 (T,) | multi-label phase |
 | `semantic_phase` | uint8 (T,3) | 上面三个 phase 的列堆叠 |
 
-**attrs**：`arm`、`pre_grasp_idx`、`pre_place_idx`、`grasp_close_end`、`lift_end`、`place_open_end`、
-`resting_z`、`lift_threshold`、`T`、`labeler_version`、`flags`。
+不再写旧字段 `checkpoint_type` / `checkpoint_type_point` / `checkpoint_window_type` / `h_ckpt`；训练和评估端统一使用 `next_checkpoint_type` + `h_entry`。
+
+**attrs**：`arm`、`pre_grasp_idx`、`pre_grasp_window_start/end`、`pre_place_idx`、`pre_place_window_start/end`、
+`grasp_close_end`、`lift_end`、`place_open_end`、`resting_z`、`lift_threshold`、`T`、`labeler_version`、`flags`。
 
 此外 hdf5 还含 `/keystate_substep/*`（埋点原始逐帧标签）、`/object_pose/{object,target_object}`（7维 pose）。
 读取范式参考 `policy/DP/process_data.py`（绝对路径 `root["/joint_action/..."]`）和 `envs/utils/parse_hdf5.py`。
@@ -168,12 +175,12 @@ python envs/utils/keystate_inspect.py --task place_a2b_left --config demo_clean
 
 ## 8. 下一步（Stage 1）与待决项
 
-Stage 1 = **KeyState Head warm-up**：模型从 obs 预测 `action_chunk` + `checkpoint_type_hat` +
-`h_ckpt_hat` + `semantic_phase_hat`，loss 加权（`L_action + λ_type L_type + λ_h L_horizon + λ_ph L_phase`）。
+Stage 1 = **KeyState Head warm-up**：模型从 obs 预测 `action_chunk` + `next_checkpoint_type_hat` +
+`h_entry_hat` + `semantic_phase_hat`，loss 加权（`L_action + λ_type L_type + λ_h L_h_entry + λ_ph L_phase`）。
 
 待决/可扩展：
 
 - 目前只 50 条、单任务。Stage 1 训练可能需要更多条数 / 更多 `place_*` 任务（RoboTwin 有 20+ 个 pick-place 任务，物体网格齐全）。
-- horizon 对数间隔分桶（0-2/3-5/.../>50 步）Idea 里有，标注器目前输出原始 `h_ckpt` 整数，分桶可在训练侧做。
+- `h_entry` 表示 distance-to-checkpoint-window-entry；窗口内为 0，训练侧再做对数间隔分桶（0-2/3-5/.../>50 步）。
 - `place_a2b` 是「放到 B 左侧」非堆叠，`placed-and-released` 判据用「夹爪开 + 物体落稳」而非接触 target；
   换 `place_can_basket` 等容器任务时需按任务调整 placed 的定义。
