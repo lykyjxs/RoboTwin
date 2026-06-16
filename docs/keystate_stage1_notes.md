@@ -1,197 +1,577 @@
-# KeyState Stage 1 — 模型修改 project
+# KeyState Stage 1 — Pi0 训练端方案、改动与验证记录
 
-> 本文档记录 **KeyState-aware VLA** 项目 Stage 1
-> (KeyState Head warm-up,模型修改)的最终 plan、已落盘改动、各文件完成情况、未完成 task。
-> 分支:所有 Stage 1 改动在 `keystate-stage1-heads`(从 `keystate-stage0-labeler` 切出)。
+本文档记录 **KeyState-aware VLA** 项目 Stage 1 的训练/测评端实现、已完成修改、验证结果与待完成事项。
 
----
-
-## 0. 路径与分支(先读)
-
-- **Stage 1 代码基线**:`third_party/RoboTwin/policy/pi0`(纯 JAX/Flax 的 openpi fork,实际训练/eval 都走它)。
-  这是**旧版结构**:`Pi0Config` 与 `Pi0` 同在 `pi0.py`(**无独立 pi0_config.py、无 models_pytorch、无 pi05/adarms**)。
-  **不要套用** `source code/openpi`(新版,拆了 config、带 PyTorch)的行号/布局。
-- **不要修改** `source code/openpi`(仅参考,且自带无关本地改动)。
-- 当前分支:`keystate-stage1-heads`,继承 Stage 0 commit `603bcc1`(dense next_checkpoint_type 标签)。
+> 分支：`keystate-stage1-heads`  
+> 范围：仅训练/测评端；本轮未修改部署端 `deploy_policy.py` / `deploy_policy.yml` / `pi_model.py`。
 
 ---
 
-## 1. 最终执行的 Plan
+## 0. Stage 1 方案大纲
 
-### 目标
-在 π0(flow-matching VLA)上挂 KeyState 预测头:预测「下一个 control checkpoint 的 type / horizon」+ 辅助「semantic phase」。本轮 = **Stage 1 KeyState Head warm-up**:
-- 一次性写齐 scaffold(三头 + 融合 + 配置开关 + 数据管线),
-- 但**本轮只实现 type / horizon / phase 头**(horizon loss 默认 CE);**z 头(Stage 2)、KeyState→Action 融合(Stage 3)只保留占位结构,在配置层硬闸 `NotImplementedError`**,
-- 让 Stage 1 端到端可跑、能出加权 loss。
+Stage 1 的目标是：**在 Pi0 / OpenPI 训练路径中加入 KeyState 监督头，让模型在生成 action chunk 的同时学习当前帧到下一个 checkpoint window 的结构化信息**。
 
-### 设计总原则
-**开关全关 = 原版 pi0 逐位等价**:所有新模块 `if config.use_*` gate,关闭时不创建任何新参数(freeze filter / FSDP / 权重加载 / loss 数值不变),现有 4 个 robotwin config 不受影响。
+模型预测三类监督：
 
-### 三个数据语义关键点(读 keystate_labeler.py 源码后确认)
-1. **监督用 dense `next_checkpoint_type`**,不是稀疏 `checkpoint_type`(后者全程 0、仅 2 个非零帧)。dense 语义:`≤pre_grasp`→1、`(pre_grasp,pre_place]`→2、`>pre_place`→0。
-2. **`h_ckpt=-1` = invalid**(最后一个 checkpoint 之后)。`compute_loss` 现算 `valid=(keystate_h>=0)`,**safe-label `where(valid,label,0)` 再 mask**(避免 -1 进 CE 被当负索引/NaN)。只 mask **type+horizon**;**phase 不 mask**(每帧良定义)。
-3. **horizon 对数间隔分桶**:`horizon_upper_edges=(3,6,11,21,51)`,`h<edge` 落该桶(bin0..5)。`horizon_loss_type` 默认 `"ce"`(softmax CE,简单好 debug),`"ordinal"`(CORAL)作可切换 ablation。两模式 head 维度不同:ce=n_bins=6,ordinal=n_bins-1=5。
+1. **`next_checkpoint_type`**
+   - 分类任务。
+   - 类别：`0=none`，`1=pre_grasp window`，`2=pre_place window`。
+   - 现在 type loss 对 `type=0` 也监督，不再和 horizon 共用 mask。
 
-### 数据流(三跳)
+2. **`h_entry`**
+   - horizon-to-window-entry。
+   - 原始数据中是整数帧距；训练侧分桶为 horizon bin。
+   - 窗口内为 0，无 next/current window 为 -1。
+
+3. **`semantic_phase`**
+   - multi-label BCE。
+   - `[object_in_hand, lifted, placed_and_released]`。
+
+训练目标：
+
+```text
+L = L_flow_action + λ_type L_type + λ_h L_h_entry + λ_phase L_phase
 ```
-Stage0 采集 hdf5  /keystate{checkpoint_type(sparse), next_checkpoint_type(dense), h_ckpt(-1=invalid), semantic_phase}
-  ⓪ keystate_labeler.py 已派生 next_checkpoint_type(v2)
-  ① process_data.py        → 中间 hdf5 observations/keystate/*
-  ② convert_..._lerobot_robotwin.py → LeRobot dataset 注册 observation.keystate.* feature
-  ③ data_loader(delta_timestamps 只 window action;keystate 作"当前帧单点"自动返回)
-  → KeyStateInputs transform → Observation.keystate_* → compute_loss
+
+当前仍是 **Stage 1 warm-up**：只做监督头训练与评估；Stage 2 latent 和部署端 adaptive execution 尚未实现。
+
+---
+
+## 1. 当前 git 状态与改动范围
+
+本轮主要 commits：
+
+```text
+63bc46d Fix KeyState none type supervision
+a130a88 Weight near-checkpoint horizon bins
+b3b2e3e Add checkpoint window labels
+e13169e Propagate h_entry through Pi0 training data path
+74fc227 Reserve KeyState latent zone interface
+7cb4e82 Update KeyState window visualizer
 ```
-关键:keystate 是 per-step 标量,只取**当前帧**,**不进** `action_sequence_keys`、不窗口化。
 
-### 头与 loss
-- 头挂 **prefix(PaliGemma/VLM)stream**,masked-mean 池化,width=2048。
-- `compute_loss` 返回 `(flow_loss[*b,ah], ks_losses_dict)`;`train.py` 用 `has_aux=True`,`total=mean(flow)+sum(ks)`,各分项进 wandb。
-- keystate TrainConfig 的 λ 先设 **0.1**(避免 aux 压过 action loss);`Pi0Config` 默认 λ=1.0 不动、只在该 config 覆盖。
-- `CheckpointWeightLoader` 加 `missing_regex`,keystate config 设 `".*(lora|ks_).*"` 以容忍新 `ks_*` 头随机初始化。
+主仓库 submodule pointer 已在：
 
----
+```text
+a30eaad Update RoboTwin KeyState window training changes
+```
 
-## 2. 已真正落盘修改的文件
-
-**(a) Stage 0 分支 `keystate-stage0-labeler`,已 commit `603bcc1`:**
-- `envs/utils/keystate_labeler.py`
-- `envs/utils/keystate_inspect.py`
-
-**(b) Stage 1 分支 `keystate-stage1-heads`(全部已落盘,py_compile 通过):**
-- `policy/pi0/src/openpi/models/pi0.py`
-- `policy/pi0/src/openpi/models/pi0_fast.py`
-- `policy/pi0/src/openpi/models/model.py`
-- `policy/pi0/scripts/train.py`
-- `policy/pi0/scripts/process_data.py` ✅ **已修好(#7)**
-- `policy/pi0/examples/aloha_real/convert_aloha_data_to_lerobot_robotwin.py` ✅ **(#8)**
-- `policy/pi0/src/openpi/policies/keystate.py`(新增)✅ **(#9)**
-- `policy/pi0/src/openpi/policies/aloha_policy.py`(keystate 透传)✅ **(#9)**
-- `policy/pi0/src/openpi/training/weight_loaders.py` ✅ **(#10)**
-- `policy/pi0/src/openpi/training/config.py` ✅ **(#11)**
+本轮未提交数据、checkpoint、wandb、processed_data、training_data、eval_outputs 等生成物。
 
 ---
 
-## 3. 各文件已完成内容
+## 2. 已修改内容摘要
 
-| 文件 | 完成内容 | 状态 |
-|---|---|---|
-| `envs/utils/keystate_labeler.py` | h_ckpt 循环里派生 dense `next_checkpoint_type[t]=checkpoint_type[nxt]`,加入 labels,`LABELER_VERSION=2`。`_write_back` 自动写入 /keystate。 | ✅ 已 commit |
-| `envs/utils/keystate_inspect.py` | `load_keystate` 读 `next_checkpoint_type`;`check_episode` 加 check 9(valid 帧∈{1,2}、invalid=0、段语义断言)。 | ✅ 已 commit |
-| `pi0.py` | `Pi0Config` 加全部 KeyState 字段 + `__post_init__` 硬闸(`use_z_head`/`use_keystate_fusion`→NotImplementedError,`horizon_loss_type` 校验);顶部加 `_softmax_xent`/`_sigmoid_bce`/`_coral_loss`(per-sample [b]);`__init__` 加三头(挂 prefix width 2048,gate)+ z/fusion 占位;`compute_loss` 返回 `(flow_loss, ks_losses)` 并调 `_keystate_losses`(safe-label+valid mask,type/horizon mask、phase 不 mask,horizon ce/ordinal 可切);`embed_suffix` 加可选 `ks_cond=None` 的 Stage3 scaffold(None 时逐位等价)。 | ✅ 落盘,py_compile 通过 |
-| `pi0_fast.py` | `compute_loss` 返回注解改 tuple,return 改 `(loss, {})`。 | ✅ 落盘,py_compile 通过 |
-| `model.py` | `Observation` 加 `keystate_type/keystate_h/keystate_phase` 可选字段 + `from_dict` 用 `data.get` + `preprocess_observation` 透传;`BaseModel.compute_loss` 注解改 tuple。 | ✅ 落盘,py_compile 通过 |
-| `scripts/train.py` | `loss_fn` 解包 `(chunked_loss, ks_losses)`,`total=flow+sum(ks)`,返回 `(total, aux)`;`value_and_grad(has_aux=True)`;`info` 并入 `**aux`。 | ✅ 落盘,py_compile 通过 |
-| `scripts/process_data.py` | `load_hdf5` 读 `/keystate` 三字段并返回;`data_transform` 解包 6 值、在 `j!=last`(=qpos/images)分支收集 keystate、写出 `observations/keystate/{next_checkpoint_type(int8),h_ckpt(int32,保留-1),semantic_phase(uint8 [N,3])}`。 | ✅ 已修好 |
-| `convert_..._lerobot_robotwin.py` | `create_empty_dataset(has_keystate=)` 注册 `observation.keystate.{next_checkpoint_type(int64,(1,)),h_ckpt(int64,(1,)),semantic_phase(float32,(3,))}`;`has_keystate()` 探测;`load_raw_episode_data` 读 keystate(保留 -1);`populate_dataset` 每帧 add。 | ✅ |
-| `policies/keystate.py`(新增) | `KeyStateInputs`:`bucket_horizon`(`h<edge→bin`,与 `Pi0Config.horizon_upper_edges` 完全一致,`h<0` 保留 -1)→ `keystate_h`;`next_checkpoint_type→keystate_type(int32)`、`semantic_phase→keystate_phase(float32)`;squeeze `(1,)`;消费后 pop `keystate`;无 keystate 时 no-op。 | ✅ |
-| `policies/aloha_policy.py` | `AlohaInputs` 末尾 `if "keystate" in data: inputs["keystate"]=...` 透传。 | ✅ |
-| `training/weight_loaders.py` | `CheckpointWeightLoader.missing_regex` 字段(默认 `.*lora.*` 不变行为);keystate config 覆盖为 `.*(lora|ks_).*`。 | ✅ |
-| `training/config.py` | `KeyStateAlohaDataConfig(LeRobotAlohaDataConfig)`:`create` 在父基础上 push `KeyStateInputs`(edges 从 model_config 读);新 `TrainConfig` `pi0_base_aloha_robotwin_keystate_lora`(开 type/phase 头,λ=0.1,repack 加 keystate 子 dict,widen missing_regex)。 | ✅ |
+### 2.1 type loss 修复：监督 terminal `type=0/none`
 
----
+文件：
 
-## 4. 未完成的 task list
+```text
+policy/pi0/src/openpi/models/pi0.py
+```
 
-| # | 任务 | 状态 |
-|---|---|---|
-| 1 | keystate_labeler 派生 next_checkpoint_type | ✅ 完成(已 commit) |
-| 2 | pi0_config(本 fork 在 pi0.py 内)加字段 + 硬闸 | ✅ 完成 |
-| 3 | model.py Observation + compute_loss 注解 | ✅ 完成 |
-| 4 | pi0.py 三头 + compute_loss + 融合 scaffold | ✅ 完成 |
-| 5 | pi0_fast.py 兼容垫片 | ✅ 完成 |
-| 6 | train.py loss_fn 解包 + has_aux | ✅ 完成 |
-| **7** | **process_data.py 写 keystate** | ✅ 完成 |
-| 8 | convert_aloha_data_to_lerobot_robotwin.py 注册 keystate feature | ✅ 完成 |
-| 9 | 新建 `policies/keystate.py` KeyStateInputs + aloha_policy 透传 | ✅ 完成 |
-| 10 | weight_loaders.py 加 `missing_regex` 字段 | ✅ 完成 |
-| 11 | config.py 接线 KeyStateAlohaDataConfig + 新 TrainConfig | ✅ 完成 |
+旧逻辑：
 
-> **Stage 1 模型修改全部完成,纯静态验证已过**(全文件 py_compile;`bucket_horizon` 与 `Pi0Config.horizon_upper_edges` 语义逐桶比对一致;`KeyStateInputs` stub 跑通:-1 sentinel 保留、有效 horizon 正确分桶、无 keystate 时 no-op;config.py AST 校验配置名唯一且新 config 存在)。
-> **仍需在真实数据 + 可用 pi0/GPU 环境上跑端到端验证(见 §6/§8)**。当前已拿到真实 hdf5 路径,但当前会话所在节点没有可直接训练的 pi0 Python 环境/GPU CLI;debug worker 启动还需解决 Volcano Engine `ml_devinstance launch` 的当前 devinstance/权限问题。
+```text
+valid = h_ckpt >= 0
+loss_type 和 loss_horizon 共用 valid
+```
+
+问题：
+
+- `h=-1` 的末段帧不参与 type loss。
+- 模型没有被明确教会预测 `0=none`。
+- 对后续 adaptive execution 不安全。
+
+新逻辑：
+
+```text
+type_valid_b = keystate_type >= 0
+h_valid_b    = keystate_h_entry >= 0
+```
+
+结果：
+
+- `loss_type` 包含 `type=0/none`。
+- `loss_h_entry` 只在有 next/current checkpoint window 时监督。
+- `loss_ph` 仍全帧监督。
 
 ---
 
-## 5. 数据管线 keystate 端到端约定(已实现,供对齐)
+### 2.2 near-checkpoint horizon bin 轻量加权
 
-三跳 keystate 形状/语义,逐跳保留 `h_ckpt=-1`(invalid)sentinel:
+文件：
 
-1. **process_data.py** 写中间 hdf5 `observations/keystate/`:`next_checkpoint_type`(int8 [N])、`h_ckpt`(int32 [N],-1 原样)、`semantic_phase`(uint8 [N,3])。keystate 在 `j != last` 分支收集 → 与 **qpos/images 对齐**(观测帧 0..T-2),长度与 qpos 一致。
-2. **convert_..._lerobot_robotwin.py** 注册 LeRobot feature:`observation.keystate.next_checkpoint_type`(int64 (1,))、`.h_ckpt`(int64 (1,))、`.semantic_phase`(float32 (3,))。
-3. **config.py repack** 把上述映射进子 dict `keystate`;`AlohaInputs` 透传;`KeyStateInputs`(在其后 push)→ `keystate_type`(int32 标量)/`keystate_h`(分桶 index,-1 保留)/`keystate_phase`(float32 [3])→ `Observation.from_dict` → `compute_loss`。
+```text
+policy/pi0/src/openpi/models/pi0.py
+policy/pi0/src/openpi/training/config.py
+```
 
-> keystate **不进** `action_sequence_keys` → data_loader 的 `delta_timestamps` 不窗口化它 → LeRobot 自动返回**当前帧单点**。Normalize 用 `strict=False`,keystate 键无 norm_stats → 原样透传不归一化(标签本就不该归一化)。
+新增配置：
+
+```python
+horizon_bin0_weight: float = 1.0
+horizon_bin1_weight: float = 1.0
+```
+
+KeyState config 当前设置：
+
+```python
+horizon_bin0_weight = 1.25
+horizon_bin1_weight = 1.10
+```
+
+原因：
+
+- bin 0 / bin 1 是最接近 checkpoint window 入口的区域。
+- 样本少但控制意义强。
+- 只轻量加权，避免过度鼓励模型总预测小 h。
+
+加权方式：
+
+```text
+weighted_mean = sum(mask * bin_weight[label] * loss) / sum(mask * bin_weight[label])
+```
 
 ---
 
-## 6. 下一轮继续顺序
+### 2.3 `h_ckpt` 统一改为 `h_entry`
 
-模型修改已全部完成并 commit。下一轮 = **在真实数据 + 可用 pi0/GPU 环境上跑端到端验证**。注意:本轮验证只做 1-episode overfit/smoke debug,**不要直接 full training,不要自动 commit**。
+相关文件：
 
-### 6.1 真实数据路径与第一步检查
+```text
+policy/pi0/scripts/process_data.py
+policy/pi0/examples/aloha_real/convert_aloha_data_to_lerobot_robotwin.py
+policy/pi0/src/openpi/policies/keystate.py
+policy/pi0/src/openpi/models/model.py
+policy/pi0/src/openpi/models/pi0.py
+policy/pi0/src/openpi/training/config.py
+policy/pi0/scripts/train.py
+```
 
-真实 RoboTwin hdf5 数据已确认由用户提供在:
+新数据字段：
+
+```text
+/keystate/h_entry
+/observations/keystate/h_entry
+observation.keystate.h_entry
+Observation.keystate_h_entry
+```
+
+新 loss log：
+
+```text
+loss_h_entry
+```
+
+不再使用旧字段：
+
+```text
+h_ckpt
+keystate_h
+loss_h
+```
+
+除非是无关的 `action_horizon` / `horizon_upper_edges` 等模型通用命名。
+
+---
+
+### 2.4 KeyState data transform
+
+文件：
+
+```text
+policy/pi0/src/openpi/policies/keystate.py
+```
+
+当前职责：
+
+```text
+keystate.next_checkpoint_type -> keystate_type
+keystate.h_entry              -> keystate_h_entry, after bucket_h_entry(...)
+keystate.semantic_phase       -> keystate_phase
+```
+
+`bucket_h_entry()` 分桶规则：
+
+```text
+h_entry < 3   -> bin 0
+h_entry < 6   -> bin 1
+h_entry < 11  -> bin 2
+h_entry < 21  -> bin 3
+h_entry < 51  -> bin 4
+otherwise     -> bin 5
+h_entry < 0   -> -1 invalid
+```
+
+---
+
+### 2.5 Stage 2 latent zone 接口预留
+
+文件：
+
+```text
+policy/pi0/src/openpi/models/model.py
+policy/pi0/src/openpi/models/pi0.py
+```
+
+新增默认关闭字段：
+
+```python
+use_z_hat_zone: bool = False
+z_hat_zone_dim: int = 64
+z_h_interaction: str = "none"
+```
+
+新增 Observation pass-through 字段：
+
+```python
+keystate_z_hat_zone
+```
+
+当前行为：
+
+- 不创建新参数。
+- 不实现 z_head。
+- 不实现 z loss。
+- 默认不影响 Stage 1。
+- 如果误启用 `use_z_hat_zone=True` 或 `z_h_interaction != "none"`，会抛 `NotImplementedError`。
+
+设计意图：
+
+```text
+z_hat_zone = 未来 checkpoint window 的 latent 表征
+h_entry = 当前距离该 window 入口有多远
+后续 Stage 2 可让 z 与 h_entry 相互条件化/约束
+```
+
+---
+
+## 3. 数据管线当前约定
+
+### Stage 0 HDF5
+
+```text
+/keystate/next_checkpoint_type
+/keystate/h_entry
+/keystate/semantic_phase
+```
+
+### Pi0 processed HDF5
+
+```text
+/observations/keystate/next_checkpoint_type
+/observations/keystate/h_entry
+/observations/keystate/semantic_phase
+```
+
+### LeRobot features
+
+```text
+observation.keystate.next_checkpoint_type
+observation.keystate.h_entry
+observation.keystate.semantic_phase
+```
+
+### Model Observation
+
+```python
+Observation.keystate_type
+Observation.keystate_h_entry
+Observation.keystate_phase
+Observation.keystate_z_hat_zone  # reserved, optional
+```
+
+---
+
+## 4. 已完成验证
+
+### 4.1 Stage 0 labeler / inspector
+
+episode0 window label：
+
+```text
+pre_grasp window = [34, 71]
+pre_place window = [115, 151]
+T = 152
+flags = []
+```
+
+inspect：
+
+```text
+episode0 OK
+```
+
+---
+
+### 4.2 processed data 验证
+
+`process_data.py` 重新生成 one-episode processed data 后确认：
+
+```text
+observations/keystate keys = ['h_entry', 'next_checkpoint_type', 'semantic_phase']
+```
+
+类型：
+
+```text
+h_entry: int32
+next_checkpoint_type: int8
+semantic_phase: uint8 [N,3]
+```
+
+---
+
+### 4.3 LeRobot 转换验证
+
+新 repo_id：
+
+```text
+place_a2b_left_keystate_window_oneshot
+```
+
+LeRobot metadata 含：
+
+```text
+observation.keystate.h_entry
+observation.keystate.next_checkpoint_type
+observation.keystate.semantic_phase
+```
+
+DataLoader 检查：
+
+```text
+batch keys = ['keystate_h_entry', 'keystate_phase', 'keystate_type']
+Observation.keystate_h_entry shape = (2,)
+```
+
+---
+
+### 4.4 norm stats
+
+已为新 repo 计算：
+
+```text
+assets/pi0_base_aloha_robotwin_keystate_lora/place_a2b_left_keystate_window_oneshot/norm_stats.json
+```
+
+---
+
+### 4.5 2-step smoke training
+
+命令使用：
+
+```text
+--data.repo-id place_a2b_left_keystate_window_oneshot
+--num-train-steps 2
+--batch-size 2
+--num-workers 0
+--fsdp-devices 2
+```
+
+结果：
+
+```text
+Step 0:
+flow_loss=0.0450
+loss=0.8995
+loss_h_entry=0.1446
+loss_ph=0.3438
+loss_type=0.3660
+
+Step 1:
+flow_loss=0.0777
+loss=0.7968
+loss_h_entry=0.2660
+loss_ph=0.2129
+loss_type=0.2403
+```
+
+说明：新 `h_entry` 训练链路和 checkpoint 保存都正常。
+
+---
+
+### 4.6 1000-step overfit training
+
+W&B run：
+
+```text
+https://wandb.ai/yanko-lan-peking-university/openpi-keystate/runs/5ai6fh3d
+```
+
+实验名：
+
+```text
+stage1_keystate_window_overfit_1000step
+```
+
+checkpoint：
+
+```text
+./checkpoints/openpi/openpi-assets/checkpoints/keystate/pi0_base_aloha_robotwin_keystate_lora/stage1_keystate_window_overfit_1000step/1000
+```
+
+训练 loss 摘要：
+
+```text
+Step 0:
+flow_loss=0.0450
+loss=0.8995
+loss_h_entry=0.1446
+loss_ph=0.3438
+loss_type=0.3660
+
+Step 500:
+flow_loss=0.0246
+loss=0.0536
+loss_h_entry=0.0212
+loss_ph=0.0068
+loss_type=0.0010
+
+Step 990:
+flow_loss=0.0169
+loss=0.0924
+loss_h_entry=0.0231
+loss_ph=0.0325
+loss_type=0.0199
+```
+
+结论：`loss_type`、`loss_h_entry`、`loss_ph`、`flow_loss` 均能下降，新的 window/h_entry 监督能被模型拟合。
+
+---
+
+### 4.7 checkpoint 预测评估
+
+评估输出：
+
+```text
+policy/pi0/eval_outputs/stage1_keystate_window_overfit_1000step/keystate_window_eval_summary.json
+policy/pi0/eval_outputs/stage1_keystate_window_overfit_1000step/keystate_window_eval_rows.jsonl
+```
+
+指标：
+
+```json
+{
+  "num_samples": 151,
+  "num_valid_h_entry": 151,
+  "type_accuracy_all": 0.9867549668874173,
+  "h_entry_bin_accuracy_valid": 0.9668874172185431,
+  "h_entry_bin_mae_valid": 0.0728476821192053
+}
+```
+
+Type confusion matrix：
+
+```text
+true_type x pred_type
+[
+  [0, 0, 0],
+  [0, 72, 0],
+  [0, 2, 77]
+]
+```
+
+h_entry bin confusion matrix：
+
+```text
+true_h_entry_bin x pred_h_entry_bin
+[
+  [78, 0, 0, 0, 0, 0],
+  [3, 3, 0, 0, 0, 0],
+  [0, 0, 10, 0, 0, 0],
+  [0, 0, 0, 20, 0, 0],
+  [2, 0, 0, 0, 35, 0],
+  [0, 0, 0, 0, 0, 0]
+]
+```
+
+结论：
+
+```text
+type accuracy        ≈ 98.7%
+h_entry bin accuracy ≈ 96.7%
+h_entry bin MAE      ≈ 0.073 bin
+```
+
+---
+
+## 5. 当前待完成事项
+
+1. **多 episode 验证**
+   - 当前只在 episode0 one-shot 上 overfit。
+   - 需要对更多 episodes 重跑 v3 labeler、process、convert、train/eval。
+
+2. **terminal none 实际数据验证**
+   - episode0 processed 后没有 terminal `type=0` 样本，因为 pre_place window 延伸到最后帧。
+   - 代码已支持 type=0 监督，但需要带窗口后尾段的 episode 验证实际效果。
+
+3. **bin 0/1 权重调参**
+   - 当前轻量设置为 `1.25 / 1.10`。
+   - 后续可在更多数据上比较：`1.0/1.0`、`1.25/1.10`、`1.5/1.25`。
+
+4. **Stage 2 latent 尚未实现**
+   - 当前只预留 `z_hat_zone` 接口。
+   - 后续可引入 future checkpoint window latent target。
+
+5. **部署端尚未修改**
+   - 当前没有改 adaptive execution。
+   - 后续若进入部署阶段，再考虑用 `h_entry_hat` 控制 long chunk -> short-step mode switch。
+
+---
+
+## 6. 复现命令摘要
+
+### process data
 
 ```bash
-./data/RoboTwin/data/place_a2b_left/demo_clean/data/
+cd third_party/RoboTwin/policy/pi0
+.venv/bin/python scripts/process_data.py place_a2b_left demo_clean 1
 ```
 
-该目录应包含 `episode0.hdf5 ... episode49.hdf5`。第一步必须先检查 `episode0.hdf5` 的 `/keystate` group:
+### convert to LeRobot
 
 ```bash
-python3 - <<'PY'
-import h5py
-p = "./data/RoboTwin/data/place_a2b_left/demo_clean/data/episode0.hdf5"
-with h5py.File(p, "r") as f:
-    print("exists:", p)
-    print("/keystate keys:", list(f["/keystate"].keys()))
-    for k in ["checkpoint_type", "next_checkpoint_type", "h_ckpt", "semantic_phase"]:
-        d = f["/keystate"][k]
-        print(k, "shape=", d.shape, "dtype=", d.dtype)
-PY
+export HF_LEROBOT_HOME=$PWD/training_data
+.venv/bin/python examples/aloha_real/convert_aloha_data_to_lerobot_robotwin.py \
+  --raw_dir "$PWD/processed_data/place_a2b_left-demo_clean-1" \
+  --repo_id place_a2b_left_keystate_window_oneshot
 ```
 
-必须确认有:
-- `checkpoint_type`
-- `next_checkpoint_type`
-- `h_ckpt`
-- `semantic_phase`
+### train smoke / overfit
 
-### 6.2 1-episode tiny dataset + smoke train
+```bash
+export HF_LEROBOT_HOME=$PWD/training_data
+export OPENPI_DATA_HOME=./checkpoints/openpi
+export XLA_PYTHON_CLIENT_MEM_FRACTION=0.90
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
 
-只取 `episode0.hdf5` 构造 tiny dataset,然后跑:
-
-1. `pi0_base_aloha_robotwin_keystate_lora` 的 **20-step smoke train**。
-2. 确认没有:
-   - NaN
-   - shape error
-   - weight loading error (`ks_*` 新头应被 `missing_regex=.*(lora|ks_).*` 容忍,随机初始化)
-3. 如果 20 steps 正常,再跑 **100~500 steps**(仍然是 1-episode overfit debug,不是完整训练),观察:
-   - `flow_loss` 是否下降
-   - `loss_type` 是否下降
-   - `loss_h` 是否下降
-   - `loss_ph` 是否下降
-
-这个实验只用于验证代码和训练链路能正常学习,不用于证明方法有效。
-
-### 6.3 Verification(plan §Verification)
-
-- **0 labeler**:重跑 `keystate_labeler.py` 后 `keystate_inspect.py` 断言全过(dense type 段语义)。
-- **1 baseline 不回归**:`uv run scripts/train.py pi0_base_aloha_robotwin_lora` loss 与改动前一致、无加载报错。
-- **2 数据管线**:中间 hdf5 有 `observations/keystate/*`、LeRobot features 含 `observation.keystate.*`;batch 里 `keystate_h` 的 -1 原样保留(没被 clip 成 0)。
-- **3 safe-label+mask 关键回归**:全 invalid(h=-1)batch 不产 NaN/不报越界。
-- **4 Stage 1 训练**:wandb/日志出现 `flow_loss/loss_type/loss_h/loss_ph` 且在 1-episode overfit debug 中有下降趋势。
-- **5 加载兼容**:`ks_*` 头被 `missing_regex` 容忍、随机初始化。
-- **6 eval 不挂**:`pi_model.py`/`eval.sh` 在 keystate 为 None、融合关时与原版一致。
-
-> ⚠️ **数据相关验证(0/2/3)需要实际采集数据。** 真实数据路径已知,但需在可用 pi0 Python 环境 + GPU worker 上执行。
+.venv/bin/python scripts/train.py pi0_base_aloha_robotwin_keystate_lora \
+  --project-name openpi-keystate \
+  --exp-name stage1_keystate_window_overfit_1000step \
+  --checkpoint-base-dir ./checkpoints/openpi/openpi-assets/checkpoints/keystate \
+  --overwrite \
+  --wandb-enabled \
+  --data.repo-id place_a2b_left_keystate_window_oneshot \
+  --batch-size 2 \
+  --num-workers 0 \
+  --num-train-steps 1000 \
+  --log-interval 10 \
+  --save-interval 500 \
+  --fsdp-devices 2
+```
 
 ---
 
-## 7. 配置/接口速记(给下一轮对齐)
+## 7. 注意事项
 
-- `Pi0Config` 新增字段:`use_checkpoint_head/use_phase_head/use_z_head/use_keystate_fusion`(默认 False)、`num_checkpoint_types=3`、`num_phase_classes=3`、`z_dim=64`、`lambda_type/lambda_h/lambda_ph=1.0`、`lambda_z=0.0`、`horizon_upper_edges=(3,6,11,21,51)`、`horizon_loss_type="ce"`。
-- `Observation` 新增:`keystate_type`(dense type,[*b] int)、`keystate_h`(桶 index,-1=invalid)、`keystate_phase`([*b,3] float)。
-- 新 TrainConfig 名:`pi0_base_aloha_robotwin_keystate_lora`(拷贝 `pi0_base_aloha_robotwin_lora`,开 `use_checkpoint_head/use_phase_head`,λ=0.1,`weight_loader` missing_regex `.*(lora|ks_).*`)。
-- 新 transform:`KeyStateInputs(horizon_upper_edges=...)`,在 `AlohaInputs` 之后 push;`AlohaInputs` 加一行 `keystate` 透传;repack 加 `"keystate"` 子 dict 映射 `observation.keystate.{next_checkpoint_type,h_ckpt,semantic_phase}`。
-
----
+- 生成物不要提交：
+  - `data/`
+  - `policy/pi0/processed_data/`
+  - `policy/pi0/training_data/`
+  - `policy/pi0/eval_outputs/`
+  - `policy/pi0/wandb/`
+  - checkpoints
+- `compute_norm_stats.py` 默认 `num_workers=8` 在当前文件系统上容易卡住；本轮采用单进程等价脚本计算 norm stats。
+- checkpoint 保存到 `./checkpoints/openpi/openpi-assets/checkpoints/keystate` 正常；不要写到 `./checkpoints`。

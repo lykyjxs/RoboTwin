@@ -1,186 +1,329 @@
-# KeyState Stage 0 — 规则标注 Pick-and-Place 数据
+# KeyState Stage 0 — Checkpoint Window 标注方案与验证记录
 
-本文档记录 **KeyState-aware VLA** 项目 Stage 0（准备监督标签）
-在 RoboTwin 仿真平台上的实现：用脚本埋点自动为 pick-and-place 演示数据标注 keystate。
+本文档记录 **KeyState-aware VLA** 项目 Stage 0 的数据标注方案、已完成修改、验证结果和后续待办。
 
-> 分支：所有 keystate 相关改动在 `keystate-stage0-labeler` 分支，未改动 `main`。
+> 分支：`keystate-stage1-heads` 当前包含 Stage 0 window labeler 与 Stage 1 训练端修改。  
+> 目标：为 Stage 1/后续 adaptive action chunking 提供稳定的监督标签：`next_checkpoint_type`、`h_entry`、`semantic_phase`。
+
+---
+
+## 0. Stage 0 方案大纲
+
+Stage 0 的目标是：**把 RoboTwin scripted demo 中隐含的动作阶段，转换成可训练的 KeyState supervision labels**。
+
+核心设计：
+
+1. **脚本埋点，而非纯视觉/运动阈值**
+   - RoboTwin demo 由 `play_once()` 脚本化生成，动作顺序确定。
+   - 在 `move(stage_tag=...)` 中 passive logging 每帧的 `(stage_tag, sub_index, action_type, arm_tag)`。
+   - 不改变控制/规划逻辑，只记录标签来源。
+
+2. **control checkpoint 从单帧改为 checkpoint window**
+   - 单帧 checkpoint 对机器人控制过于尖锐。
+   - 新定义使用窗口，让模型学习“进入高风险区域”的时机。
+   - 后续执行端可以在窗口外执行较长 chunk，在进入窗口后切换短步长重观测。
+
+3. **Stage 0 输出最小必要字段**
+   - 不再保留旧字段 `checkpoint_type` / `checkpoint_type_point` / `checkpoint_window_type` / `h_ckpt` / `inside_checkpoint_window`。
+   - 统一使用：
+     - `next_checkpoint_type`
+     - `h_entry`
+     - `semantic_phase`
 
 ---
 
 ## 1. 背景与目标
 
-项目核心是把 keystate 拆成两层：
+项目核心把 KeyState 拆成两层：
 
-- **Control checkpoint**（驱动停止时机）：`pre-grasp`、`pre-place`。模型预测下一个 checkpoint 的
-  type、horizon（还有多少步到达），用 horizon 自适应决定 action chunk 执行多少步、何时重新观测。
-- **Semantic phase**（multi-label 辅助监督，不驱动停止）：`object-in-hand`、`lifted`、`placed-and-released`。
+- **Control checkpoint window**（驱动何时变谨慎/何时重新观测）：`pre_grasp window`、`pre_place window`。
+- **Semantic phase**（multi-label 辅助监督，不直接驱动停止）：`object_in_hand`、`lifted`、`placed_and_released`。
 
-Stage 0 的目标：**先用规则在仿真里自动标 50 条 pick-and-place 数据，验证标注质量**（不训练）。
+当前任务：
 
-- 任务：`place_a2b_left`（最纯粹的单物体「把 A 放到 B 左侧」，轨迹短、阶段清晰）
-- 配置：`demo_clean`（干净背景，信号最干净）
-
----
-
-## 2. 标注方案：脚本埋点（方案 A）
-
-采用 **脚本埋点 + passive logging**，而不是纯运动学阈值规则。
-
-### 为什么
-
-RoboTwin 的 demo 由 `play_once()` 脚本化生成（motion planning，非遥操作），**调用顺序写死**。
-对 `place_a2b_left`，`play_once` 固定产生 7 个 `Action`：
-
-```
-grasp_actor          -> [move(pre_grasp), move(grasp), close]   # stage_tag="grasp"
-move_by_displacement -> [move(lift)]                            # stage_tag="lift"
-place_actor          -> [move(place_pre), move(place), open]    # stage_tag="place"
-```
-
-因此每个 Action 的语义由 **「哪次 move 调用（stage_tag）+ Action 在该串里的序号 + 类型（move/close/open）」唯一确定**。
-标注器查一张固定映射表即可，**全自动、零手标、几乎无阈值规则、不需要人眼/大模型判断**。
-
-这是仿真相比真机的红利：真机没有脚本，才需要 NILS 那类 heuristic 共识打分去猜 keystate 时刻。
-当下目标是「仿真验证标注效果」，方案 A 最准、最省。将来若上真机需要纯规则，方案 A 标出的「准 GT」
-正好可当标尺来校准运动学阈值。
-
-### 固定映射表
-
-| stage_tag | Action 序号 | 类型 | → keystate |
-|---|---|---|---|
-| grasp | 1 | move | 末帧 = **pre-grasp** |
-| grasp | 2 | move | 中间过程 |
-| grasp | 3 | close | 末帧起 **object-in-hand = 1** |
-| lift | 1 | move | 末帧起 **lifted = 1** |
-| place | 1 | move | 末帧 = **pre-place** |
-| place | 2 | move | 中间过程 |
-| place | 3 | open | 末帧起 **placed-and-released = 1** |
-
-> **关键点**：必须标到**子 Action 级别**。只记 `current_stage="grasp_actor"` 这种粗标签不够——
-> 因为 grasp_actor 内含 3 个子 Action，pre-grasp 是「第 1 个 move 结束帧」而非「grasp_actor 结束帧」（后者是闭合后）。
+- 任务：`place_a2b_left`
+- 配置：`demo_clean`
+- 数据源：RoboTwin scripted pick-and-place demo
 
 ---
 
-## 3. 实现
+## 2. 脚本埋点方案
 
-埋点是**纯旁路 passive logging，不改变任何控制/规划逻辑**。改动集中在两个文件：
+RoboTwin 的 `place_a2b_left.play_once()` 固定产生如下动作序列：
+
+```text
+grasp_actor          -> [move(pre_grasp), move(grasp), close]   stage_tag="grasp"
+move_by_displacement -> [move(lift)]                            stage_tag="lift"
+place_actor          -> [move(place_pre), move(place), open]    stage_tag="place"
+```
+
+固定映射：
+
+| stage_tag | Action 序号 | 类型 | 语义 |
+|---|---:|---|---|
+| grasp | 1 | move | 旧 `pre_grasp` 点；现在作为 `pre_grasp window` 入口 |
+| grasp | 3 | close | `object_in_hand / grasp confirmed`；现在作为 `pre_grasp window` 结束 |
+| lift | 1 | move | `lifted` phase 起点 |
+| place | 1 | move | 旧 `pre_place` 点；现在作为 `pre_place window` 入口 |
+| place | 3 | open | `released / placed_and_released`；现在作为 `pre_place window` 结束 |
+
+---
+
+## 3. Checkpoint window 定义
+
+### pre_grasp window
+
+```text
+pre_grasp_window = [旧 pre_grasp 那一帧, object_in_hand / grasp confirmed 那一帧]
+```
+
+在 `place_a2b_left` 中：
+
+- window start = `grasp` stage 第 1 个 `move` 的末帧
+- window end = `grasp` stage 第 3 个 `gripper_close` 的末帧
+
+### pre_place window
+
+```text
+pre_place_window = [旧 pre_place 那一帧, released / placed_and_released 那一帧]
+```
+
+在 `place_a2b_left` 中：
+
+- window start = `place` stage 第 1 个 `move` 的末帧
+- window end = `place` stage 第 3 个 `gripper_open` 的末帧
+
+---
+
+## 4. `/keystate` 数据接口
+
+每条：
+
+```text
+data/place_a2b_left/demo_clean/data/episodeN.hdf5
+```
+
+含 `/keystate` 组。
+
+### per-step 数组
+
+所有数组长度均为 `T`，与 `/endpose`、`/observation/*/rgb` 帧对齐。
+
+| 字段 | dtype | shape | 含义 |
+|---|---|---:|---|
+| `next_checkpoint_type` | int8 | `(T,)` | 0=none / 1=pre_grasp window / 2=pre_place window。窗口外指向下一个 window，窗口内保持当前 window 类型。 |
+| `h_entry` | int32 | `(T,)` | distance-to-checkpoint-window-entry。窗口外为距离入口的帧数，窗口内为 0，无 next/current window 为 -1。 |
+| `semantic_phase` | uint8 | `(T,3)` | `[object_in_hand, lifted, placed_and_released]` |
+| `object_in_hand` | uint8 | `(T,)` | debug/可视化用 phase 单列 |
+| `lifted` | uint8 | `(T,)` | debug/可视化用 phase 单列 |
+| `placed_and_released` | uint8 | `(T,)` | debug/可视化用 phase 单列 |
+
+### 不再写入的旧字段
+
+为避免兼容逻辑污染训练端，以下旧字段已经移除：
+
+```text
+checkpoint_type
+checkpoint_type_point
+checkpoint_window_type
+inside_checkpoint_window
+h_ckpt
+```
+
+### attrs
+
+`/keystate` attrs 记录：
+
+```text
+arm
+pre_grasp_idx
+pre_grasp_window_start
+pre_grasp_window_end
+pre_place_idx
+pre_place_window_start
+pre_place_window_end
+grasp_close_end
+lift_end
+place_open_end
+resting_z
+lift_threshold
+T
+labeler_version
+flags
+```
+
+---
+
+## 5. 已修改文件摘要
 
 ### `envs/_base_task.py`
 
-- 类常量 `KEYSTATE_STAGE_CODES` / `KEYSTATE_ACTION_CODES` / `KEYSTATE_ARM_CODES`（整数编码，标注器据此解码）。
-- `_init_task_env_`：在 `self.load_actors()` **之前**初始化 `self.current_substep = None` 和
-  `self.record_actors = []`（顺序关键，见 [§5 踩坑](#5-踩坑记录)）。
-- `move()`：新增 `stage_tag: str = None` 参数（带默认值，仓库 232 处现有 `self.move(` 调用零破坏）。
-  循环里每个 Action 执行前，把 `(stage_tag, sub_index, action_type, arm_tag)` 记到 `self.current_substep`；
-  move 结束清空（避免污染后续无 tag 的 move）。
-- `get_obs()`：把 `current_substep`（整数编码 ndarray）和两物体 pose 写进每帧的 pkl_dic。
+历史 Stage 0 埋点：
+
+- 增加 `KEYSTATE_STAGE_CODES` / `KEYSTATE_ACTION_CODES` / `KEYSTATE_ARM_CODES`。
+- `move()` 支持 `stage_tag`。
+- `get_obs()` 写入 `/keystate_substep/*` 和 object pose。
 
 ### `envs/place_a2b_left.py`
 
-- `play_once` 3 处 move 调用传 `stage_tag="grasp"/"lift"/"place"`。
-- `load_actors()` 末尾注册 `self.record_actors = [("object", self.object), ("target_object", self.target_object)]`。
+历史 Stage 0 埋点：
 
-### 离线脚本（新增）
+- `play_once()` 的 grasp/lift/place 三段传入 `stage_tag`。
+- 注册 `record_actors` 以便写入 object pose。
 
-| 脚本 | 作用 |
-|---|---|
-| `envs/utils/keystate_labeler.py` | 读 `/keystate_substep`，查固定映射表，把 checkpoint-window 标签写回 hdf5 的 `/keystate` 组 + json 摘要 |
-| `envs/utils/keystate_visualize.py` | 生成曲线图（gripper/物体z/EE速度 + 竖线）+ 标注叠加视频 |
-| `envs/utils/keystate_inspect.py` | 自查工具：50 条表格 + 窗口/帧对齐/phase重叠/`h_entry`/手臂交叉核对等断言 |
+### `envs/utils/keystate_labeler.py`
 
-> 技术红利：`envs/utils/pkl2hdf5.py` 会**递归**把 pkl 任意字典自动转 HDF5，所以在 `get_obs` 加新键无需改转换器。
-> 注意：键名含子串 `"rgb"` 会被 JPEG 编码（要避开）；叶子必须是 ndarray，否则标量会被静默丢弃。
+当前 window 版本：
 
----
+- `LABELER_VERSION = 3`。
+- 从 `/keystate_substep` 解码旧 `pre_grasp` / `pre_place` 点和确认事件。
+- 生成 checkpoint windows：
+  - pre_grasp: `[pre_grasp_idx, grasp_close_end]`
+  - pre_place: `[pre_place_idx, place_open_end]`
+- 写入最小字段：
+  - `next_checkpoint_type`
+  - `h_entry`
+  - `semantic_phase`
+  - phase 单列 debug 字段
+- 不再写旧字段 `checkpoint_type/h_ckpt/...`。
 
-## 4. 数据接口（给 Stage 1 用）
+### `envs/utils/keystate_inspect.py`
 
-每条 `data/place_a2b_left/demo_clean/data/episodeN.hdf5` 含 `/keystate` 组。
+- 检查 v3 字段是否存在。
+- 检查 window 起止顺序。
+- 检查 window 内是否 `h_entry=0` 且 type 正确。
+- 检查 window 外是否指向下一个 window entry。
+- 检查末段 none 是否 `next_checkpoint_type=0, h_entry=-1`。
 
-**checkpoint window 定义**：
+### `envs/utils/keystate_visualize.py`
 
-- `pre_grasp window`：从旧 `pre_grasp` 那一帧开始，到 `object_in_hand / grasp confirmed` 那一帧结束。
-- `pre_place window`：从旧 `pre_place` 那一帧开始，到 `released / placed_and_released` 那一帧结束。
-
-**per-step 数组**（长度 T，与 `/endpose`、`/observation/*/rgb` 帧严格对齐）：
-
-| 字段 | dtype | 含义 |
-|---|---|---|
-| `next_checkpoint_type` | int8 (T,) | 0=none / 1=pre_grasp window / 2=pre_place window；窗口外指向下一个窗口，窗口内保持当前窗口类型 |
-| `h_entry` | int32 (T,) | 距下一个 checkpoint window 入口还有多少步；窗口内为 0；最后无 next/current window 的末段为 -1 |
-| `object_in_hand` | uint8 (T,) | multi-label phase |
-| `lifted` | uint8 (T,) | multi-label phase |
-| `placed_and_released` | uint8 (T,) | multi-label phase |
-| `semantic_phase` | uint8 (T,3) | 上面三个 phase 的列堆叠 |
-
-不再写旧字段 `checkpoint_type` / `checkpoint_type_point` / `checkpoint_window_type` / `h_ckpt`；训练和评估端统一使用 `next_checkpoint_type` + `h_entry`。
-
-**attrs**：`arm`、`pre_grasp_idx`、`pre_grasp_window_start/end`、`pre_place_idx`、`pre_place_window_start/end`、
-`grasp_close_end`、`lift_end`、`place_open_end`、`resting_z`、`lift_threshold`、`T`、`labeler_version`、`flags`。
-
-此外 hdf5 还含 `/keystate_substep/*`（埋点原始逐帧标签）、`/object_pose/{object,target_object}`（7维 pose）。
-读取范式参考 `policy/DP/process_data.py`（绝对路径 `root["/joint_action/..."]`）和 `envs/utils/parse_hdf5.py`。
+- 适配 v3 字段。
+- 曲线图显示：gripper / object z / EE speed / `next_checkpoint_type` / `h_entry`。
+- 视频标注显示：`type`、`h_entry`、phase。
+- checkpoint window 内用边框和阴影显示。
 
 ---
 
-## 5. 踩坑记录
+## 6. 已完成验证
 
-**bug：`object_pose` 字段缺失。** 第一次管路检查（采 2 集）时发现 `keystate_substep` 写进了 hdf5 但 `object_pose` 没有。
+### 6.1 episode0 window label 验证
 
-- **根因**：`_init_task_env_` 里 `self.load_actors()` 在前（任务在其中注册 `record_actors`），
-  但默认值 `self.record_actors = []` 当时被放在了 `load_actors()` **之后**，把任务注册的列表又覆盖回空了
-  → `get_obs` 里 `if self.record_actors` 永远为假 → 不写 object_pose。
-  （`current_substep` 没事，因为它在 play_once 时才设，晚于 `_init_task_env_`。）
-- **修复**：把两个默认值初始化移到 `self.load_actors()` **之前**。
-- **教训**：① 给 Base_Task 加「任务可在 load_actors 中覆盖」的属性时，默认值必须在 `load_actors()` 之前初始化；
-  ② 大批量采集前永远先采 1-2 集，用 `read_hdf5` 断言所有新字段存在且帧对齐，通过再跑全量——这次正是靠管路检查避免了 50 条白采。
+在当前 one-episode 拷贝数据上重跑 labeler：
 
----
-
-## 6. 验证结果
-
-50 条全部通过：**0 flag、0 error**，顺序断言全过，**手臂检测与 `scene_info.json` 的 `{a}` 字段 50/50 一致**，
-物体 z 抬升均 ~0.1m（脚本命令的抬升量）。曲线图与标注视频人工抽查确认 keystate 落在正确视觉时刻。
-
----
-
-## 7. 复现 / 自查命令
-
-环境：独立 conda env **RoboTwin**（python3.10，torch2.4.1+cu121，sapien3.0.0b1），与 base 隔离。
-
-```bash
-conda activate RoboTwin
-
-# 渲染冒烟测试（虽有 vulkan ICD 警告，sapien builtin vulkan + 4090 可正常离屏渲染）
-python script/test_render.py
-
-# 采集 50 条（先规划 seed 再回放采集 + 转 hdf5/video）
-bash collect_data.sh place_a2b_left demo_clean 0
-
-# 标注（查固定映射表写 /keystate）
-python envs/utils/keystate_labeler.py --task place_a2b_left --config demo_clean --all
-
-# 可视化（曲线图 + 标注视频）
-python envs/utils/keystate_visualize.py --task place_a2b_left --config demo_clean --all
-
-# 自查（50 条表格 + 8 项断言；加 --episode N 看单条逐帧标签）
-python envs/utils/keystate_inspect.py --task place_a2b_left --config demo_clean
+```text
+python envs/utils/keystate_labeler.py --task place_a2b_left --config demo_clean --data-root <RoboTwin>/data --episode 0
 ```
 
-产物在 `data/place_a2b_left/demo_clean/`：`data/`(hdf5)、`video/`(原始视频)、
-`keystate/episodeN.json`(摘要)、`keystate/plots/`(曲线图)、`keystate/video_annot/`(标注视频)。
-（注意 `data/` 目录在 `.gitignore` 中，不进 git。）
+结果：
+
+```text
+pre_grasp window = [34, 71]
+pre_place window = [115, 151]
+T = 152
+flags = []
+```
+
+inspect：
+
+```text
+episode0 OK
+```
+
+逐帧语义符合预期：
+
+- `t < 34`：type=1，`h_entry` 递减到 0
+- `34 <= t <= 71`：pre_grasp window，type=1，`h_entry=0`
+- `72 <= t < 115`：type=2，`h_entry` 递减到 0
+- `115 <= t <= 151`：pre_place window，type=2，`h_entry=0`
+
+注意：当前 episode 的 pre_place window 到原始最后帧，因此 processed 后没有 terminal none 样本；后续多 episode/更长尾段数据可验证 `type=0` 实际监督效果。
+
+### 6.2 processed hdf5 验证
+
+`process_data.py` 重新生成 one-episode processed data 后，确认：
+
+```text
+observations/keystate keys = ['h_entry', 'next_checkpoint_type', 'semantic_phase']
+```
+
+字段类型：
+
+```text
+h_entry: int32
+next_checkpoint_type: int8
+semantic_phase: uint8 [N,3]
+```
+
+### 6.3 LeRobot 转换验证
+
+新 repo_id：
+
+```text
+place_a2b_left_keystate_window_oneshot
+```
+
+LeRobot metadata 中包含：
+
+```text
+observation.keystate.h_entry
+observation.keystate.next_checkpoint_type
+observation.keystate.semantic_phase
+```
+
+### 6.4 可视化验证
+
+用户已检查当前 window/h_entry 可视化，暂未发现明显数据问题。
 
 ---
 
-## 8. 下一步（Stage 1）与待决项
+## 7. 当前待完成
 
-Stage 1 = **KeyState Head warm-up**：模型从 obs 预测 `action_chunk` + `next_checkpoint_type_hat` +
-`h_entry_hat` + `semantic_phase_hat`，loss 加权（`L_action + λ_type L_type + λ_h L_h_entry + λ_ph L_phase`）。
+1. 在更多 episode 上重跑 v3 labeler，确认不同轨迹 window 定义稳定。
+2. 如果任务从 `place_a2b_left` 扩展到其他 pick/place 任务，需要按任务确认：
+   - pre_grasp window 入口/结束事件
+   - pre_place window 入口/结束事件
+   - `placed_and_released` 是否仍由 gripper open 作为确认事件
+3. 当前 one-episode 没有 terminal none 样本，后续需要用带窗口后尾段的数据验证：
+   - `next_checkpoint_type=0`
+   - `h_entry=-1`
+   - `loss_type` 对 none 类监督有效
+4. 后续 Stage 1/Stage 2 训练端继续使用 `next_checkpoint_type + h_entry + semantic_phase`，不要重新引入 `h_ckpt` 或旧 `checkpoint_type`。
 
-待决/可扩展：
+---
 
-- 目前只 50 条、单任务。Stage 1 训练可能需要更多条数 / 更多 `place_*` 任务（RoboTwin 有 20+ 个 pick-place 任务，物体网格齐全）。
-- `h_entry` 表示 distance-to-checkpoint-window-entry；窗口内为 0，训练侧再做对数间隔分桶（0-2/3-5/.../>50 步）。
-- `place_a2b` 是「放到 B 左侧」非堆叠，`placed-and-released` 判据用「夹爪开 + 物体落稳」而非接触 target；
-  换 `place_can_basket` 等容器任务时需按任务调整 placed 的定义。
+## 8. 复现命令
+
+```bash
+cd ./third_party/RoboTwin
+
+# 标注
+/root/miniconda3/envs/RoboTwin/bin/python envs/utils/keystate_labeler.py \
+  --task place_a2b_left \
+  --config demo_clean \
+  --data-root "$PWD/data" \
+  --episode 0
+
+# 自查
+/root/miniconda3/envs/RoboTwin/bin/python envs/utils/keystate_inspect.py \
+  --task place_a2b_left \
+  --config demo_clean \
+  --data-root "$PWD/data" \
+  --episode 0
+
+# 可视化
+/root/miniconda3/envs/RoboTwin/bin/python envs/utils/keystate_visualize.py \
+  --task place_a2b_left \
+  --config demo_clean \
+  --data-root "$PWD/data" \
+  --episode 0
+```
+
+生成物位于：
+
+```text
+data/place_a2b_left/demo_clean/keystate/episode0.json
+data/place_a2b_left/demo_clean/keystate/plots/episode0.png
+data/place_a2b_left/demo_clean/keystate/video_annot/episode0.mp4
+```
+
+这些均为数据/可视化产物，不提交 git。
