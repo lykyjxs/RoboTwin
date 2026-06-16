@@ -369,32 +369,33 @@ class Pi0(_model.BaseModel):
         # masked-mean pool over the prefix (VLM) tokens -> [b, pg_w]
         pooled = (prefix_out * prefix_mask[..., None]).sum(1) / jnp.clip(prefix_mask.sum(1, keepdims=True), 1)
 
-        # per-sample valid mask: frames past the last checkpoint have h_ckpt == -1 (no next checkpoint).
-        # Their type/horizon are meaningless -> mask them out of type/horizon (phase stays well-defined).
-        valid_b = obs.keystate_h >= 0  # [b] bool
-        valid = valid_b.astype(jnp.float32)
-        denom = jnp.clip(valid.sum(), 1.0)
+        # per-sample masks:
+        #   * type is meaningful on every labeled frame, including terminal/no-next-checkpoint
+        #     frames where keystate_type == 0 ("none"). This matters for execution: the
+        #     model must learn to say "no next checkpoint" instead of freely predicting 1/2.
+        #   * horizon is meaningful only when a future/current checkpoint target exists.
+        type_valid_b = obs.keystate_type >= 0
+        h_valid_b = obs.keystate_h >= 0  # [b] bool
 
-        def masked_mean(per_sample):
-            return (valid * per_sample).sum() / denom
+        def masked_mean(per_sample, mask):
+            mask = mask.astype(jnp.float32)
+            return (mask * per_sample).sum() / jnp.clip(mask.sum(), 1.0)
 
         if self._ks.use_checkpoint_head:
             # Supervise with the DENSE next_checkpoint_type (sparse checkpoint_type marks only 2 frames).
-            # safe-label BEFORE the loss: never let an invalid/meaningless label enter CE/ordinal
-            # (integer-label CE treats -1 as a negative index = last class; and 0 * NaN = NaN would
-            # survive the later mask). where(valid, label, 0) -> safe class 0, then mask.
-            type_label = jnp.where(valid_b, obs.keystate_type, 0)
+            # safe-label BEFORE the loss: never let an invalid/meaningless label enter CE/ordinal.
+            type_label = jnp.where(type_valid_b, obs.keystate_type, 0)
             type_ce = _softmax_xent(self.ks_type_head(pooled), type_label)
-            ks_losses["loss_type"] = self._ks.lambda_type * masked_mean(type_ce)
+            ks_losses["loss_type"] = self._ks.lambda_type * masked_mean(type_ce, type_valid_b)
 
-            h_label = jnp.where(valid_b, obs.keystate_h, 0)  # bucket index 0..5; safe 0 for invalid
+            h_label = jnp.where(h_valid_b, obs.keystate_h, 0)  # bucket index 0..5; safe 0 for invalid
             h_logits = self.ks_horizon_head(pooled)
             if self._ks.horizon_loss_type == "ce":
                 h_loss = _softmax_xent(h_logits, h_label)
             else:  # "ordinal" (CORAL)
                 n_bins = len(self._ks.horizon_upper_edges) + 1
                 h_loss = _coral_loss(h_logits, h_label, n_bins)
-            ks_losses["loss_h"] = self._ks.lambda_h * masked_mean(h_loss)
+            ks_losses["loss_h"] = self._ks.lambda_h * masked_mean(h_loss, h_valid_b)
 
         if self._ks.use_phase_head:
             # phase is well-defined on every frame -> no valid mask, plain batch-mean.
