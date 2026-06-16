@@ -106,11 +106,14 @@ class Pi0Config(_model.BaseModelConfig):
     use_checkpoint_head: bool = False  # dense next-checkpoint type classification + horizon binning
     use_phase_head: bool = False  # 3-way multi-label semantic phase (BCE)
     use_z_head: bool = False  # latent KeyState-JEPA head (Stage 2; hard-gated in __post_init__)
+    use_z_hat_zone: bool = False  # reserved Stage 2 interface: future checkpoint-window latent (no params yet)
     use_keystate_fusion: bool = False  # inject keystate condition into action expert (Stage 3; hard-gated)
 
     num_checkpoint_types: int = 3  # configurable vocab: {0:none, 1:pre_grasp, 2:pre_place, ...}
     num_phase_classes: int = 3  # {object_in_hand, lifted, placed_and_released}
     z_dim: int = 64  # latent dim placeholder (Stage 2)
+    z_hat_zone_dim: int = 64  # reserved latent size for future checkpoint-window representation
+    z_h_interaction: str = "none"  # reserved: how z_hat_zone and h_entry will interact in Stage 2
 
     lambda_type: float = 1.0
     lambda_h: float = 1.0
@@ -135,6 +138,13 @@ class Pi0Config(_model.BaseModelConfig):
         if self.use_z_head:
             raise NotImplementedError(
                 "KeyState-JEPA z head needs the EMA encoder / z_target (Stage 2); not implemented this round.")
+        if self.use_z_hat_zone:
+            raise NotImplementedError(
+                "z_hat_zone is a reserved Stage 2 interface for future checkpoint-window latents; "
+                "keep use_z_hat_zone=False until the latent target path is implemented.")
+        if self.z_h_interaction != "none":
+            raise NotImplementedError(
+                "z_h_interaction is reserved for Stage 2 z_hat_zone <-> h_entry coupling; keep it 'none'.")
         if self.use_keystate_fusion:
             raise NotImplementedError(
                 "KeyState->Action fusion is reserved for Stage 3; keep use_keystate_fusion=False in Stage 1.")

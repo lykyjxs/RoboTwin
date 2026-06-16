@@ -105,6 +105,9 @@ class Observation(Generic[ArrayT]):
     keystate_type: at.Int[ArrayT, "*b"] | None = None  # dense next_checkpoint_type
     keystate_h_entry: at.Int[ArrayT, "*b"] | None = None  # h_entry bucket index; -1 = no next/current window
     keystate_phase: at.Float[ArrayT, "*b p"] | None = None  # multi-label semantic phase targets
+    # Reserved Stage 2 interface: future checkpoint-window latent target/prediction. It is pass-through only
+    # for now; no z head or loss is implemented in Stage 1.
+    keystate_z_hat_zone: at.Float[ArrayT, "*b z"] | None = None
 
     @classmethod
     def from_dict(cls, data: at.PyTree[ArrayT]) -> "Observation[ArrayT]":
@@ -127,6 +130,7 @@ class Observation(Generic[ArrayT]):
             keystate_type=data.get("keystate_type"),
             keystate_h_entry=data.get("keystate_h_entry"),
             keystate_phase=data.get("keystate_phase"),
+            keystate_z_hat_zone=data.get("keystate_z_hat_zone"),
         )
 
     def to_dict(self) -> at.PyTree[ArrayT]:
@@ -209,6 +213,7 @@ def preprocess_observation(
         keystate_type=observation.keystate_type,
         keystate_h_entry=observation.keystate_h_entry,
         keystate_phase=observation.keystate_phase,
+        keystate_z_hat_zone=observation.keystate_z_hat_zone,
     )
 
 
