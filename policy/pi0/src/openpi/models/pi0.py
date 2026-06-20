@@ -108,7 +108,14 @@ class Pi0Config(_model.BaseModelConfig):
     use_z_entry_descriptor: bool = False  # Stage 2 bootstrap descriptor auxiliary prediction
     use_z_head: bool = False  # reserved for future frozen-Pi0 latent / JEPA-style Stage 2 variant
     use_z_hat_zone: bool = False  # reserved old Stage 2 interface name; not used by descriptor bootstrap
-    use_keystate_fusion: bool = False  # inject keystate condition into action expert (Stage 3; hard-gated)
+    use_keystate_fusion: bool = False  # inject keystate condition into action expert (Stage 3; default off)
+    keystate_fusion_mode: str = "none"  # "none" | "late_xattn" | future "layerwise_xattn"
+    ks_fusion_source: str = "gt"  # "gt" | "pred" | "mixed"
+    ks_memory_dim: int | None = None  # reserved; default Stage3 memory width is action-expert width
+    ks_xattn_num_heads: int = 8
+    ks_xattn_alpha_init: float = 1e-3
+    ks_xattn_use_layernorm: bool = True
+    ks_mixed_gt_prob: float = 1.0
 
     num_checkpoint_types: int = 3  # configurable vocab: {0:none, 1:pre_grasp, 2:pre_place, ...}
     num_phase_classes: int = 3  # {object_in_hand, lifted, placed_and_released}
@@ -157,8 +164,29 @@ class Pi0Config(_model.BaseModelConfig):
             raise NotImplementedError(
                 "z_h_interaction is reserved for future z_hat_zone <-> h_entry coupling; keep it 'none'.")
         if self.use_keystate_fusion:
+            if self.keystate_fusion_mode == "none":
+                raise ValueError("use_keystate_fusion=True requires a concrete keystate_fusion_mode.")
+            if self.keystate_fusion_mode != "late_xattn":
+                raise NotImplementedError(
+                    f"keystate_fusion_mode={self.keystate_fusion_mode!r} is reserved; only 'late_xattn' is planned.")
+            if not self.use_checkpoint_head or not self.use_phase_head or not self.use_z_entry_descriptor:
+                raise ValueError(
+                    "Stage3 KeyState fusion requires checkpoint, phase, and z_entry_descriptor heads to be enabled.")
             raise NotImplementedError(
-                "KeyState->Action fusion is reserved for Stage 3; keep use_keystate_fusion=False in Stage 2.")
+                "stage3-common defines the KeyState fusion config/data interface only; "
+                "implement the concrete adapter on feature/keystate-stage3-late-xattn.")
+        elif self.keystate_fusion_mode != "none":
+            raise ValueError("keystate_fusion_mode must be 'none' when use_keystate_fusion=False.")
+        if self.ks_fusion_source not in ("gt", "pred", "mixed"):
+            raise ValueError(f"ks_fusion_source must be 'gt', 'pred', or 'mixed', got {self.ks_fusion_source!r}")
+        if not 0.0 <= self.ks_mixed_gt_prob <= 1.0:
+            raise ValueError(f"ks_mixed_gt_prob must be in [0, 1], got {self.ks_mixed_gt_prob}")
+        if self.ks_xattn_alpha_init == 0.0:
+            raise ValueError("ks_xattn_alpha_init must be nonzero so cross-attention parameters receive gradients.")
+        if self.ks_xattn_num_heads <= 0:
+            raise ValueError(f"ks_xattn_num_heads must be positive, got {self.ks_xattn_num_heads}")
+        if self.ks_memory_dim is not None and self.ks_memory_dim <= 0:
+            raise ValueError(f"ks_memory_dim must be positive when set, got {self.ks_memory_dim}")
         if self.horizon_loss_type not in ("ce", "ordinal"):
             raise ValueError(f"horizon_loss_type must be 'ce' or 'ordinal', got {self.horizon_loss_type!r}")
 
@@ -191,9 +219,15 @@ class Pi0Config(_model.BaseModelConfig):
                 state=jax.ShapeDtypeStruct([batch_size, self.action_dim], jnp.float32),
                 tokenized_prompt=jax.ShapeDtypeStruct([batch_size, self.max_token_len], jnp.int32),
                 tokenized_prompt_mask=jax.ShapeDtypeStruct([batch_size, self.max_token_len], bool),
+                keystate_type=jax.ShapeDtypeStruct([batch_size], jnp.int32)
+                if self.use_checkpoint_head or self.use_keystate_fusion else None,
+                keystate_h_entry=jax.ShapeDtypeStruct([batch_size], jnp.int32)
+                if self.use_checkpoint_head or self.use_keystate_fusion else None,
+                keystate_phase=jax.ShapeDtypeStruct([batch_size, self.num_phase_classes], jnp.float32)
+                if self.use_phase_head or self.use_keystate_fusion else None,
                 keystate_z_entry_descriptor=jax.ShapeDtypeStruct(
                     [batch_size, self.z_entry_descriptor_dim], jnp.float32)
-                if self.use_z_entry_descriptor else None,
+                if self.use_z_entry_descriptor or self.use_keystate_fusion else None,
             )
         action_spec = jax.ShapeDtypeStruct([batch_size, self.action_horizon, self.action_dim], jnp.float32)
 

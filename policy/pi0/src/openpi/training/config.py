@@ -481,7 +481,7 @@ _CONFIGS = [
         batch_size=32,  # the total batch_size not pre_gpu batch_size
         weight_loader=weight_loaders.CheckpointWeightLoader(
             "s3://openpi-assets/checkpoints/pi0_base/params",
-            missing_regex=".*(lora|ks_).*",  # tolerate randomly-initialized KeyState heads
+            missing_regex=".*(lora|ks_).*",  # tolerate randomly-initialized LoRA, KeyState heads, and Stage3 ks_* fusion params
         ),
         num_train_steps=30000,
         fsdp_devices=1,  # refer line 359
