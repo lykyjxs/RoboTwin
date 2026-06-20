@@ -89,6 +89,26 @@ def _coral_loss(cum_logits, labels, n_bins):
     return jnp.sum(per, axis=-1)
 
 
+class KeyStateLateCrossAttention(nnx.Module):
+    """Late cross-attention from action tokens to a compact KeyState memory."""
+
+    def __init__(self, width: int, num_heads: int, *, rngs: nnx.Rngs):
+        if width % num_heads != 0:
+            raise ValueError(f"width={width} must be divisible by num_heads={num_heads}")
+        self.attn = nnx.MultiHeadAttention(
+            num_heads=num_heads,
+            in_features=width,
+            qkv_features=width,
+            out_features=width,
+            dropout_rate=0.0,
+            decode=False,
+            rngs=rngs,
+        )
+
+    def __call__(self, query, memory):
+        return self.attn(query, memory, memory, deterministic=True)
+
+
 @dataclasses.dataclass(frozen=True)
 class Pi0Config(_model.BaseModelConfig):
     dtype: str = "bfloat16"
@@ -168,13 +188,10 @@ class Pi0Config(_model.BaseModelConfig):
                 raise ValueError("use_keystate_fusion=True requires a concrete keystate_fusion_mode.")
             if self.keystate_fusion_mode != "late_xattn":
                 raise NotImplementedError(
-                    f"keystate_fusion_mode={self.keystate_fusion_mode!r} is reserved; only 'late_xattn' is planned.")
+                    f"keystate_fusion_mode={self.keystate_fusion_mode!r} is reserved; only 'late_xattn' is implemented.")
             if not self.use_checkpoint_head or not self.use_phase_head or not self.use_z_entry_descriptor:
                 raise ValueError(
                     "Stage3 KeyState fusion requires checkpoint, phase, and z_entry_descriptor heads to be enabled.")
-            raise NotImplementedError(
-                "stage3-common defines the KeyState fusion config/data interface only; "
-                "implement the concrete adapter on feature/keystate-stage3-late-xattn.")
         elif self.keystate_fusion_mode != "none":
             raise ValueError("keystate_fusion_mode must be 'none' when use_keystate_fusion=False.")
         if self.ks_fusion_source not in ("gt", "pred", "mixed"):
@@ -307,11 +324,19 @@ class Pi0(_model.BaseModel):
             self.ks_z_entry_descriptor_head = nnx.Linear(ae_w, config.z_entry_descriptor_dim, rngs=rngs)
         if config.use_z_head:  # Future frozen-Pi0/JEPA target path; hard-gated in Pi0Config.__post_init__.
             self.ks_z_head = nnx.Linear(pg_w, config.z_dim, rngs=rngs)
-        if config.use_keystate_fusion:  # Stage 3 placeholder
+        if config.use_keystate_fusion:  # Stage 3 late cross-attention: [type, h_entry_bin, phase, z_entry] memory.
+            if ae_w % config.ks_xattn_num_heads != 0:
+                raise ValueError(
+                    f"action expert width {ae_w} must be divisible by ks_xattn_num_heads={config.ks_xattn_num_heads}")
             self.ks_type_embed = nnx.Embed(config.num_checkpoint_types, ae_w, rngs=rngs)
             self.ks_horizon_embed = nnx.Embed(n_bins, ae_w, rngs=rngs)
-            self.ks_z_proj = nnx.Linear(config.z_dim, ae_w, rngs=rngs)
-            self.ks_fuse_proj = nnx.Linear(ae_w, ae_w, rngs=rngs)
+            self.ks_phase_proj = nnx.Linear(config.num_phase_classes, ae_w, rngs=rngs)
+            self.ks_z_entry_proj = nnx.Linear(config.z_entry_descriptor_dim, ae_w, rngs=rngs)
+            if config.ks_xattn_use_layernorm:
+                self.ks_action_ln = nnx.LayerNorm(num_features=ae_w, rngs=rngs)
+                self.ks_memory_ln = nnx.LayerNorm(num_features=ae_w, rngs=rngs)
+            self.ks_late_xattn = KeyStateLateCrossAttention(ae_w, config.ks_xattn_num_heads, rngs=rngs)
+            self.ks_late_xattn_alpha = nnx.Param(jnp.asarray(config.ks_xattn_alpha_init, dtype=jnp.float32))
 
     @at.typecheck
     def embed_prefix(
@@ -389,6 +414,71 @@ class Pi0(_model.BaseModel):
         ar_mask = jnp.array(ar_mask)
         return tokens, input_mask, ar_mask
 
+    def _pool_prefix(self, prefix_out, prefix_mask):
+        return (prefix_out * prefix_mask[..., None]).sum(1) / jnp.clip(prefix_mask.sum(1, keepdims=True), 1)
+
+    def _predict_keystate_features(self, prefix_pooled, action_hidden):
+        type_id = jnp.argmax(self.ks_type_head(prefix_pooled), axis=-1).astype(jnp.int32)
+        h_logits = self.ks_horizon_head(prefix_pooled)
+        if self._ks.horizon_loss_type == "ce":
+            h_entry_bin = jnp.argmax(h_logits, axis=-1).astype(jnp.int32)
+        else:
+            h_entry_bin = jnp.sum(jax.nn.sigmoid(h_logits) > 0.5, axis=-1).astype(jnp.int32)
+        phase = jax.nn.sigmoid(self.ks_phase_head(prefix_pooled))
+        z_entry = self.ks_z_entry_descriptor_head(jnp.mean(action_hidden, axis=1))
+        return type_id, h_entry_bin, phase, z_entry
+
+    def _gt_keystate_features(self, obs: _model.Observation):
+        if (
+            obs.keystate_type is None
+            or obs.keystate_h_entry is None
+            or obs.keystate_phase is None
+            or obs.keystate_z_entry_descriptor is None
+        ):
+            raise ValueError(
+                "ks_fusion_source='gt' requires keystate_type, keystate_h_entry, "
+                "keystate_phase, and keystate_z_entry_descriptor in Observation.")
+        return obs.keystate_type, obs.keystate_h_entry, obs.keystate_phase, obs.keystate_z_entry_descriptor
+
+    def _select_keystate_features(self, obs, prefix_pooled, action_hidden, rng, *, train: bool):
+        source = self._ks.ks_fusion_source
+        if source == "mixed" and not train:
+            source = "pred"
+        if source == "gt":
+            return self._gt_keystate_features(obs)
+        pred = self._predict_keystate_features(prefix_pooled, action_hidden)
+        if source == "pred":
+            return pred
+        if rng is None:
+            raise ValueError("ks_fusion_source='mixed' requires an rng during training.")
+        gt = self._gt_keystate_features(obs)
+        use_gt = jax.random.bernoulli(rng, self._ks.ks_mixed_gt_prob, pred[0].shape)
+        return tuple(jnp.where(use_gt.reshape(use_gt.shape + (1, ) * (g.ndim - use_gt.ndim)), g, p) for g, p in zip(gt, pred, strict=True))
+
+    def _build_keystate_memory_tokens(self, type_id, h_entry_bin, phase, z_entry, dtype):
+        n_horizon_bins = len(self._ks.horizon_upper_edges) + 1
+        type_id = jnp.clip(type_id.astype(jnp.int32), 0, self._ks.num_checkpoint_types - 1)
+        h_entry_bin = jnp.clip(h_entry_bin.astype(jnp.int32), 0, n_horizon_bins - 1)
+        type_token = self.ks_type_embed(type_id)
+        horizon_token = self.ks_horizon_embed(h_entry_bin)
+        phase_token = self.ks_phase_proj(phase.astype(jnp.float32))
+        z_token = self.ks_z_entry_proj(z_entry.astype(jnp.float32))
+        return jnp.stack([type_token, horizon_token, phase_token, z_token], axis=1).astype(dtype)
+
+    def _apply_keystate_late_fusion(self, obs, prefix_pooled, action_hidden, rng, *, train: bool):
+        if not self._ks.use_keystate_fusion:
+            return action_hidden
+        type_id, h_entry_bin, phase, z_entry = self._select_keystate_features(
+            obs, prefix_pooled, action_hidden, rng, train=train)
+        memory = self._build_keystate_memory_tokens(type_id, h_entry_bin, phase, z_entry, action_hidden.dtype)
+        query = action_hidden
+        if self._ks.ks_xattn_use_layernorm:
+            query = self.ks_action_ln(query)
+            memory = self.ks_memory_ln(memory)
+        delta = self.ks_late_xattn(query, memory)
+        alpha = self.ks_late_xattn_alpha.value.astype(action_hidden.dtype)
+        return action_hidden + alpha * delta.astype(action_hidden.dtype)
+
     @override
     def compute_loss(self,
                      rng: at.KeyArrayLike,
@@ -396,7 +486,7 @@ class Pi0(_model.BaseModel):
                      actions: _model.Actions,
                      *,
                      train: bool = False) -> tuple[at.Float[at.Array, "*b ah"], dict[str, at.Array]]:
-        preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
+        preprocess_rng, noise_rng, time_rng, ks_rng = jax.random.split(rng, 4)
         observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
 
         batch_shape = actions.shape[:-2]
@@ -416,7 +506,10 @@ class Pi0(_model.BaseModel):
         (prefix_out, suffix_out), _ = self.PaliGemma.llm([prefix_tokens, suffix_tokens],
                                                          mask=attn_mask,
                                                          positions=positions)
-        v_t = self.action_out_proj(suffix_out[:, -self.action_horizon:])
+        action_hidden = suffix_out[:, -self.action_horizon:]
+        prefix_pooled = self._pool_prefix(prefix_out, prefix_mask)
+        action_hidden = self._apply_keystate_late_fusion(observation, prefix_pooled, action_hidden, ks_rng, train=train)
+        v_t = self.action_out_proj(action_hidden)
         flow_loss = jnp.mean(jnp.square(v_t - u_t), axis=-1)
 
         ks_losses = self._keystate_losses(prefix_out, prefix_mask, suffix_out, observation)
@@ -435,7 +528,7 @@ class Pi0(_model.BaseModel):
             return ks_losses
 
         # masked-mean pool over the prefix (VLM) tokens -> [b, pg_w]
-        pooled = (prefix_out * prefix_mask[..., None]).sum(1) / jnp.clip(prefix_mask.sum(1, keepdims=True), 1)
+        pooled = self._pool_prefix(prefix_out, prefix_mask)
 
         # per-sample masks:
         #   * type is meaningful on every labeled frame, including terminal/no-next-checkpoint
@@ -509,7 +602,8 @@ class Pi0(_model.BaseModel):
         prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
         prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
         positions = jnp.cumsum(prefix_mask, axis=1) - 1
-        _, kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
+        (prefix_out, _), kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
+        prefix_pooled = self._pool_prefix(prefix_out, prefix_mask)
 
         def step(carry):
             x_t, time = carry
@@ -537,7 +631,9 @@ class Pi0(_model.BaseModel):
                                                              positions=positions,
                                                              kv_cache=kv_cache)
             assert prefix_out is None
-            v_t = self.action_out_proj(suffix_out[:, -self.action_horizon:])
+            action_hidden = suffix_out[:, -self.action_horizon:]
+            action_hidden = self._apply_keystate_late_fusion(observation, prefix_pooled, action_hidden, None, train=False)
+            v_t = self.action_out_proj(action_hidden)
 
             return x_t + dt * v_t, time + dt
 

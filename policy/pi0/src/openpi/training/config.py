@@ -541,6 +541,69 @@ _CONFIGS = [
         num_train_steps=30000,
         fsdp_devices=1,
     ),
+    # pi0_base by lora + Stage 3 late KeyState cross-attention: starts from the Stage2
+    # auxiliary heads and injects [type, h_entry_bin, phase, z_entry] as a compact memory that
+    # action tokens cross-attend immediately before action_out_proj.
+    TrainConfig(
+        name="pi0_base_aloha_robotwin_keystate_stage3_late_xattn_lora",
+        model=pi0.Pi0Config(
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            use_checkpoint_head=True,
+            use_phase_head=True,
+            use_z_entry_descriptor=True,
+            use_keystate_fusion=True,
+            keystate_fusion_mode="late_xattn",
+            ks_fusion_source="gt",
+            z_entry_descriptor_dim=64,
+            lambda_type=0.1,
+            lambda_h=0.1,
+            lambda_ph=0.1,
+            lambda_z_entry_descriptor=0.1,
+            horizon_bin0_weight=1.0,
+            horizon_bin1_weight=1.10,
+            ks_xattn_alpha_init=1e-3,
+        ),
+        data=KeyStateAlohaDataConfig(
+            repo_id="place_a2b_left_keystate_z_entry_descriptor_actionexpert_oneshot",
+            assets=AssetsConfig(
+                assets_dir="./assets/pi0_base_aloha_robotwin_keystate_lora",
+                asset_id="place_a2b_left_keystate_window_oneshot",
+            ),
+            adapt_to_pi=False,
+            repack_transforms=_transforms.Group(inputs=[
+                _transforms.RepackTransform({
+                    "images": {
+                        "cam_high": "observation.images.cam_high",
+                        "cam_left_wrist": "observation.images.cam_left_wrist",
+                        "cam_right_wrist": "observation.images.cam_right_wrist",
+                    },
+                    "state": "observation.state",
+                    "actions": "action",
+                    "prompt": "prompt",
+                    "keystate": {
+                        "next_checkpoint_type": "observation.keystate.next_checkpoint_type",
+                        "h_entry": "observation.keystate.h_entry",
+                        "semantic_phase": "observation.keystate.semantic_phase",
+                        "z_entry_descriptor": "observation.keystate.z_entry_descriptor",
+                    },
+                })
+            ]),
+            base_config=DataConfig(
+                local_files_only=True,
+                prompt_from_task=True,
+            ),
+        ),
+        freeze_filter=pi0.Pi0Config(paligemma_variant="gemma_2b_lora",
+                                    action_expert_variant="gemma_300m_lora").get_freeze_filter(),
+        batch_size=32,
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "s3://openpi-assets/checkpoints/pi0_base/params",
+            missing_regex=".*(lora|ks_).*",
+        ),
+        num_train_steps=30000,
+        fsdp_devices=1,
+    ),
     # pi0_fast_base by lora
     TrainConfig(
         name="pi0_fast_aloha_robotwin_lora",
