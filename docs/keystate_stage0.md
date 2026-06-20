@@ -4,6 +4,7 @@
 
 > 分支：`keystate-stage1-heads` 当前包含 Stage 0 window labeler 与 Stage 1 训练端修改。  
 > 目标：为 Stage 1/后续 adaptive action chunking 提供稳定的监督标签：`next_checkpoint_type`、`h_entry`、`semantic_phase`。
+> 说明：`next_checkpoint_type` 是历史代码字段名；当前论文语义建议理解为 **current-or-next checkpoint type**：窗口外指向即将进入的窗口，窗口内保持当前高风险窗口类型。
 
 ---
 
@@ -26,7 +27,7 @@ Stage 0 的目标是：**把 RoboTwin scripted demo 中隐含的动作阶段，�
 3. **Stage 0 输出最小必要字段**
    - 不再保留旧字段 `checkpoint_type` / `checkpoint_type_point` / `checkpoint_window_type` / `h_ckpt` / `inside_checkpoint_window`。
    - 统一使用：
-     - `next_checkpoint_type`
+     - `next_checkpoint_type`（历史字段名；语义为 current-or-next checkpoint type）
      - `h_entry`
      - `semantic_phase`
 
@@ -111,7 +112,7 @@ data/place_a2b_left/demo_clean/data/episodeN.hdf5
 
 | 字段 | dtype | shape | 含义 |
 |---|---|---:|---|
-| `next_checkpoint_type` | int8 | `(T,)` | 0=none / 1=pre_grasp window / 2=pre_place window。窗口外指向下一个 window，窗口内保持当前 window 类型。 |
+| `next_checkpoint_type` | int8 | `(T,)` | 历史字段名，当前语义为 current-or-next checkpoint type：0=none / 1=pre_grasp window / 2=pre_place window。窗口外指向下一个 window，窗口内保持当前 high-risk window 类型。 |
 | `h_entry` | int32 | `(T,)` | distance-to-checkpoint-window-entry。窗口外为距离入口的帧数，窗口内为 0，无 next/current window 为 -1。 |
 | `semantic_phase` | uint8 | `(T,3)` | `[object_in_hand, lifted, placed_and_released]` |
 | `object_in_hand` | uint8 | `(T,)` | debug/可视化用 phase 单列 |
@@ -288,6 +289,7 @@ observation.keystate.semantic_phase
    - `h_entry=-1`
    - `loss_type` 对 none 类监督有效
 4. 后续 Stage 1/Stage 2 训练端继续使用 `next_checkpoint_type + h_entry + semantic_phase`，不要重新引入 `h_ckpt` 或旧 `checkpoint_type`。
+5. Stage0 原始标签不需要为了新 bucket 重新设计；下游训练端将 raw `h_entry` 分成：`h=0 -> bin0`、`1<=h<4 -> bin1`、`4<=h<7 -> bin2`、`7<=h<11 -> bin3`、`11<=h<21 -> bin4`、`21<=h<51 -> bin5`、`h>=51 -> bin6`，其中 `h<0` 仍为 invalid。
 
 ---
 

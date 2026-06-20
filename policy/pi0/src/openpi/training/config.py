@@ -256,7 +256,7 @@ class KeyStateAlohaDataConfig(LeRobotAlohaDataConfig):
         # Start from the parent config (AlohaInputs/Outputs, optional delta actions, model transforms).
         base = super().create(assets_dirs, model_config)
         # Bucket edges must match the head: read them off the model config when available.
-        horizon_upper_edges = tuple(getattr(model_config, "horizon_upper_edges", (3, 6, 11, 21, 51)))
+        horizon_upper_edges = tuple(getattr(model_config, "horizon_upper_edges", (1, 4, 7, 11, 21, 51)))
         data_transforms = base.data_transforms.push(
             inputs=[keystate_policy.KeyStateInputs(horizon_upper_edges=horizon_upper_edges)],
         )
@@ -448,7 +448,7 @@ _CONFIGS = [
             lambda_type=0.1,
             lambda_h=0.1,
             lambda_ph=0.1,
-            horizon_bin0_weight=1.25,
+            horizon_bin0_weight=1.0,
             horizon_bin1_weight=1.10,
         ),
         data=KeyStateAlohaDataConfig(
@@ -485,6 +485,61 @@ _CONFIGS = [
         ),
         num_train_steps=30000,
         fsdp_devices=1,  # refer line 359
+    ),
+    # pi0_base by lora + KeyState heads (Stage 2 bootstrap z-entry descriptor): extends Stage 1 with
+    # a deterministic descriptor target for the future/current checkpoint-window entry. This is only a
+    # plumbing/training bootstrap and is not the final frozen-Pi0 latent target described in the paper idea.
+    TrainConfig(
+        name="pi0_base_aloha_robotwin_keystate_stage2_lora",
+        model=pi0.Pi0Config(
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            use_checkpoint_head=True,
+            use_phase_head=True,
+            use_z_entry_descriptor=True,
+            z_entry_descriptor_dim=64,
+            lambda_type=0.1,
+            lambda_h=0.1,
+            lambda_ph=0.1,
+            lambda_z_entry_descriptor=0.1,
+            horizon_bin0_weight=1.0,
+            horizon_bin1_weight=1.10,
+        ),
+        data=KeyStateAlohaDataConfig(
+            repo_id="place_a2b_left_keystate_z_entry_descriptor_bootstrap_oneshot",
+            adapt_to_pi=False,
+            repack_transforms=_transforms.Group(inputs=[
+                _transforms.RepackTransform({
+                    "images": {
+                        "cam_high": "observation.images.cam_high",
+                        "cam_left_wrist": "observation.images.cam_left_wrist",
+                        "cam_right_wrist": "observation.images.cam_right_wrist",
+                    },
+                    "state": "observation.state",
+                    "actions": "action",
+                    "prompt": "prompt",
+                    "keystate": {
+                        "next_checkpoint_type": "observation.keystate.next_checkpoint_type",
+                        "h_entry": "observation.keystate.h_entry",
+                        "semantic_phase": "observation.keystate.semantic_phase",
+                        "z_entry_descriptor": "observation.keystate.z_entry_descriptor",
+                    },
+                })
+            ]),
+            base_config=DataConfig(
+                local_files_only=True,
+                prompt_from_task=True,
+            ),
+        ),
+        freeze_filter=pi0.Pi0Config(paligemma_variant="gemma_2b_lora",
+                                    action_expert_variant="gemma_300m_lora").get_freeze_filter(),
+        batch_size=32,
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "s3://openpi-assets/checkpoints/pi0_base/params",
+            missing_regex=".*(lora|ks_).*",
+        ),
+        num_train_steps=30000,
+        fsdp_devices=1,
     ),
     # pi0_fast_base by lora
     TrainConfig(

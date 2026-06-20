@@ -9,13 +9,16 @@
 
 ## 0. Stage 1 方案大纲
 
-Stage 1 的目标是：**在 Pi0 / OpenPI 训练路径中加入 KeyState 监督头，让模型在生成 action chunk 的同时学习当前帧到下一个 checkpoint window 的结构化信息**。
+Stage 1 的目标是：**在 Pi0 / OpenPI 训练路径中加入 KeyState 监督头，让模型在生成 action chunk 的同时学习当前帧到当前/下一个 checkpoint window 的结构化信息**。
+
+说明：代码字段仍叫 `next_checkpoint_type`，但当前论文语义建议理解为 **current-or-next checkpoint type**：窗口外指向即将进入的窗口，窗口内表示当前所在高风险窗口。
 
 模型预测三类监督：
 
-1. **`next_checkpoint_type`**
+1. **`next_checkpoint_type`**（历史字段名，当前语义为 current-or-next checkpoint type）
    - 分类任务。
    - 类别：`0=none`，`1=pre_grasp window`，`2=pre_place window`。
+   - 窗口外指向 upcoming checkpoint window；窗口内保持 current checkpoint window 类型。
    - 现在 type loss 对 `type=0` 也监督，不再和 horizon 共用 mask。
 
 2. **`h_entry`**
@@ -98,7 +101,7 @@ h_valid_b    = keystate_h_entry >= 0
 
 ---
 
-### 2.2 near-checkpoint horizon bin 轻量加权
+### 2.2 `h_entry` bucket 方案与 near-entry 轻量加权
 
 文件：
 
@@ -110,22 +113,38 @@ policy/pi0/src/openpi/training/config.py
 新增配置：
 
 ```python
+horizon_upper_edges: tuple[int, ...] = (1, 4, 7, 11, 21, 51)
 horizon_bin0_weight: float = 1.0
 horizon_bin1_weight: float = 1.0
 ```
 
-KeyState config 当前设置：
+当前 bucket 语义：
 
-```python
-horizon_bin0_weight = 1.25
-horizon_bin1_weight = 1.10
+```text
+bin 0: h_entry == 0                 # inside checkpoint window
+bin 1: 1 <= h_entry < 4             # very near entry, still before window
+bin 2: 4 <= h_entry < 7
+bin 3: 7 <= h_entry < 11
+bin 4: 11 <= h_entry < 21
+bin 5: 21 <= h_entry < 51
+bin 6: h_entry >= 51
+invalid: h_entry < 0, no horizon loss
 ```
 
 原因：
 
-- bin 0 / bin 1 是最接近 checkpoint window 入口的区域。
-- 样本少但控制意义强。
-- 只轻量加权，避免过度鼓励模型总预测小 h。
+- `h_entry == 0` 单独保留，直接表示“当前已经在 checkpoint window 内”。
+- `h_entry=1/2/3` 合并，避免入口前一两帧样本过稀。
+- Stage3 可以直接使用 `h_entry_bin == 0` 表示 inside-window，不需要额外引入 `keystate_inside_window`。
+
+KeyState config 当前设置：
+
+```python
+horizon_bin0_weight = 1.0   # bin0 现在可能很大，不再上调
+horizon_bin1_weight = 1.10  # 轻量强调 near-entry pre-window 样本
+```
+
+建议每次换数据后打印 histogram，再决定是否继续调权重。
 
 加权方式：
 
@@ -195,14 +214,23 @@ keystate.semantic_phase       -> keystate_phase
 `bucket_h_entry()` 分桶规则：
 
 ```text
-h_entry < 3   -> bin 0
-h_entry < 6   -> bin 1
-h_entry < 11  -> bin 2
-h_entry < 21  -> bin 3
-h_entry < 51  -> bin 4
-otherwise     -> bin 5
-h_entry < 0   -> -1 invalid
+h_entry == 0       -> bin 0   # inside checkpoint window
+1 <= h_entry < 4   -> bin 1   # very near entry, still before window
+4 <= h_entry < 7   -> bin 2
+7 <= h_entry < 11  -> bin 3
+11 <= h_entry < 21 -> bin 4
+21 <= h_entry < 51 -> bin 5
+h_entry >= 51      -> bin 6
+h_entry < 0        -> -1 invalid
 ```
+
+对应代码配置：
+
+```python
+horizon_upper_edges = (1, 4, 7, 11, 21, 51)
+```
+
+因此 horizon head 输出维度从旧方案的 6 类变为 7 类；旧 checkpoint 的 `ks_horizon_head` shape 不再兼容，需要按新 bucket 重新训练。
 
 ---
 
@@ -244,6 +272,30 @@ z_hat_zone = 未来 checkpoint window 的 latent 表征
 h_entry = 当前距离该 window 入口有多远
 后续 Stage 2 可让 z 与 h_entry 相互条件化/约束
 ```
+
+### 2.6 Stage 2 z_entry_descriptor 现状（已实现）
+
+Stage 2 已在后续分支中实现，替代了本节早期预留的 `z_hat_zone` 命名。当前实际使用字段为：
+
+```text
+/keystate/z_entry_descriptor
+/observations/keystate/z_entry_descriptor
+observation.keystate.z_entry_descriptor
+Observation.keystate_z_entry_descriptor
+```
+
+当前主方案不再使用 prefix-only latent，而是使用 frozen Pi0 action expert hidden 生成 checkpoint-entry key-state latent：
+
+```text
+encoder = frozen_pi0_action_expert_demo_t0001_projected_v1
+source hidden = suffix_out[:, -action_horizon:] mean over action tokens
+source dim = 1024
+projection = fixed_random_projection_v1 -> 64D
+```
+
+`z_entry_descriptor` 只在 `h_entry > 0` 的窗口前帧监督；`h_entry == 0` 或 `h_entry == -1` 时写 zero vector，并由模型 loss 自动 mask。
+
+Stage2 仍然不改变部署和 action generation 路径；z head 是训练时辅助监督。
 
 ---
 
@@ -501,19 +553,21 @@ h_entry bin MAE      ≈ 0.073 bin
 
 1. **多 episode 验证**
    - 当前只在 episode0 one-shot 上 overfit。
-   - 需要对更多 episodes 重跑 v3 labeler、process、convert、train/eval。
+   - 后续若有要求，需要对更多 episodes 重跑 v3 labeler、process、convert、train/eval。
 
 2. **terminal none 实际数据验证**
    - episode0 processed 后没有 terminal `type=0` 样本，因为 pre_place window 延伸到最后帧。
    - 代码已支持 type=0 监督，但需要带窗口后尾段的 episode 验证实际效果。
 
-3. **bin 0/1 权重调参**
-   - 当前轻量设置为 `1.25 / 1.10`。
-   - 后续可在更多数据上比较：`1.0/1.0`、`1.25/1.10`、`1.5/1.25`。
+3. **bin histogram 与权重调参**
+   - 当前新 bucket 下，bin0 表示整个 checkpoint window 内部，样本数可能很大，因此已改为 `horizon_bin0_weight=1.0`。
+   - bin1 表示窗口前 `h=1/2/3` 的 near-entry 样本，当前轻量设置为 `1.10`。
+   - 换多 episode 数据后先运行 histogram 检查，再比较：`1.0/1.0`、`1.0/1.10`、按 class frequency reweight 等方案。
 
-4. **Stage 2 latent 尚未实现**
-   - 当前只预留 `z_hat_zone` 接口。
-   - 后续可引入 future checkpoint window latent target。
+4. **Stage 2 latent 已在后续分支实现**
+   - 早期预留的 `z_hat_zone` 接口仍保留但不作为当前主路径。
+   - 当前 Stage2 使用 `z_entry_descriptor`，主 backend 为 `frozen_pi0_action_expert_demo_t0001_projected_v1`。
+   - z target 只在 `h_entry > 0` 时监督，窗口内不监督。
 
 5. **部署端尚未修改**
    - 当前没有改 adaptive execution。
@@ -538,6 +592,16 @@ export HF_LEROBOT_HOME=$PWD/training_data
   --raw_dir "$PWD/processed_data/place_a2b_left-demo_clean-1" \
   --repo_id place_a2b_left_keystate_window_oneshot
 ```
+
+### inspect h_entry bucket histogram
+
+```bash
+cd third_party/RoboTwin/policy/pi0
+.venv/bin/python scripts/inspect_keystate_h_entry_buckets.py \
+  processed_data/place_a2b_left-demo_clean-1
+```
+
+新 bucket 应打印 7 个有效 bin 加 invalid 计数。对于当前 one-episode，bin0 会覆盖两个 checkpoint window 内的所有帧，因此可能显著大于 near-entry bin1。
 
 ### train smoke / overfit
 

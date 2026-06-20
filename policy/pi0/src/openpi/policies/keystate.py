@@ -1,4 +1,4 @@
-"""KeyState data transform (Stage 1).
+"""KeyState data transform.
 
 Maps the raw per-frame KeyState labels carried alongside the observation
 (`keystate.{next_checkpoint_type, h_entry, semantic_phase}`, written by
@@ -6,9 +6,13 @@ Maps the raw per-frame KeyState labels carried alongside the observation
 `examples/aloha_real/convert_aloha_data_to_lerobot_robotwin.py`) into the fields the
 model expects on `model.Observation`: `keystate_type` / `keystate_h_entry` / `keystate_phase`.
 
+Stage 2 may additionally carry `keystate.z_entry_descriptor`, a checkpoint-entry
+Key-state latent target. The current main backend extracts it from frozen Pi0 action-expert
+hidden and projects it to 64D; older bootstrap/prefix backends use the same field name.
+
 Two responsibilities live here (and nowhere else, so the contract is in one place):
 
-1. Bucket the raw integer distance-to-window-entry `h_entry` into a log-spaced bin index,
+1. Bucket the raw integer distance-to-window-entry `h_entry` into a bin index,
    matching `Pi0Config.horizon_upper_edges` ("h < edge -> that bin") EXACTLY. The invalid
    sentinel `h_entry == -1` (frames with no next/current checkpoint window) is preserved as
    `-1`; the model's `_keystate_losses` reads `keystate_h_entry >= 0` as its horizon-valid
@@ -16,6 +20,8 @@ Two responsibilities live here (and nowhere else, so the contract is in one plac
 2. Pass `next_checkpoint_type` through as `keystate_type` and `semantic_phase` as
    `keystate_phase` (float, for BCE), squeezing the trailing singleton dim that the
    `(1,)`-shaped LeRobot scalar features carry.
+3. Pass optional `z_entry_descriptor` through as `keystate_z_entry_descriptor` without
+   bucketing or normalization; the generator controls descriptor scale.
 
 This transform is a no-op when `keystate` is absent (baseline configs / inference),
 so existing pipelines are unaffected.
@@ -29,10 +35,11 @@ from openpi import transforms
 
 
 def bucket_h_entry(h_entry: np.ndarray, upper_edges: tuple[int, ...]) -> np.ndarray:
-    """Log-spaced distance-to-window-entry binning, matching Pi0Config.horizon_upper_edges semantics.
+    """Distance-to-window-entry binning, matching Pi0Config.horizon_upper_edges semantics.
 
-    "h < edge -> that bin": with edges (3, 6, 11, 21, 51) ->
-      h<3 -> 0 | h<6 -> 1 | h<11 -> 2 | h<21 -> 3 | h<51 -> 4 | else -> 5
+    "h < edge -> that bin": with edges (1, 4, 7, 11, 21, 51) ->
+      h==0 -> 0 | 1<=h<4 -> 1 | 4<=h<7 -> 2 | 7<=h<11 -> 3 |
+      11<=h<21 -> 4 | 21<=h<51 -> 5 | else -> 6.
     i.e. num_bins = len(upper_edges) + 1. The invalid sentinel (h_entry < 0) is passed
     through as -1 so the model can mask it out (it is never a valid bin index).
     """
@@ -52,7 +59,7 @@ class KeyStateInputs(transforms.DataTransformFn):
     """
 
     # Must match Pi0Config.horizon_upper_edges for the buckets to line up with the head.
-    horizon_upper_edges: tuple[int, ...] = (3, 6, 11, 21, 51)
+    horizon_upper_edges: tuple[int, ...] = (1, 4, 7, 11, 21, 51)
 
     def __call__(self, data: dict) -> dict:
         ks = data.get("keystate")
@@ -70,6 +77,8 @@ class KeyStateInputs(transforms.DataTransformFn):
         data["keystate_h_entry"] = bucket_h_entry(h_entry_raw, self.horizon_upper_edges)
         # multi-label targets for BCE -> float.
         data["keystate_phase"] = np.asarray(ks["semantic_phase"]).astype(np.float32)
+        if "z_entry_descriptor" in ks:
+            data["keystate_z_entry_descriptor"] = np.asarray(ks["z_entry_descriptor"]).astype(np.float32)
 
         # consumed: drop the raw sub-dict so it does not leak into the model input dict.
         data.pop("keystate", None)

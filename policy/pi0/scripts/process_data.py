@@ -37,6 +37,13 @@ def load_hdf5(dataset_path):
                 "h_entry": ks["h_entry"][()],                            # int32 (T,), -1 = no next/current window
                 "semantic_phase": ks["semantic_phase"][()],              # uint8 (T, 3)
             }
+            if "z_entry_descriptor" in ks:
+                z_entry_descriptor = ks["z_entry_descriptor"][()].astype(np.float32)
+                if z_entry_descriptor.shape[0] != keystate["next_checkpoint_type"].shape[0]:
+                    raise ValueError(
+                        f"/keystate/z_entry_descriptor length {z_entry_descriptor.shape[0]} does not match "
+                        f"next_checkpoint_type length {keystate['next_checkpoint_type'].shape[0]} in {dataset_path}")
+                keystate["z_entry_descriptor"] = z_entry_descriptor
 
     return left_gripper, left_arm, right_gripper, right_arm, image_dict, keystate
 
@@ -98,7 +105,7 @@ def data_transform(path, episode_num, save_path):
         right_arm_dim = []
         # KeyState labels collected on the SAME frames as qpos/images (j != last) so they stay aligned.
         # Stays empty when the source hdf5 has no /keystate (keystate is None) -> nothing written below.
-        ks_next_type, ks_h_entry, ks_phase = [], [], []
+        ks_next_type, ks_h_entry, ks_phase, ks_z_entry_descriptor = [], [], [], []
 
         last_state = None
         for j in range(0, left_gripper_all.shape[0]):
@@ -137,6 +144,8 @@ def data_transform(path, episode_num, save_path):
                     ks_next_type.append(keystate["next_checkpoint_type"][j])
                     ks_h_entry.append(keystate["h_entry"][j])
                     ks_phase.append(keystate["semantic_phase"][j])
+                    if "z_entry_descriptor" in keystate:
+                        ks_z_entry_descriptor.append(keystate["z_entry_descriptor"][j])
 
             if j != 0:
                 action = state
@@ -145,6 +154,11 @@ def data_transform(path, episode_num, save_path):
                 right_arm_dim.append(right_arm.shape[0])
 
         hdf5path = os.path.join(save_path, f"episode_{i}/episode_{i}.hdf5")
+        # A previous interrupted run can leave a tiny/corrupt HDF5 file at this path. On some
+        # network filesystems, h5py.File(..., "w") may still trip over that stale file; unlink first
+        # so rerunning the processor is idempotent for the generated output.
+        if os.path.exists(hdf5path):
+            os.remove(hdf5path)
 
         with h5py.File(hdf5path, "w") as f:
             f.create_dataset("action", data=np.array(actions))
@@ -167,6 +181,11 @@ def data_transform(path, episode_num, save_path):
                 ks_grp.create_dataset("next_checkpoint_type", data=np.array(ks_next_type, dtype=np.int8))
                 ks_grp.create_dataset("h_entry", data=np.array(ks_h_entry, dtype=np.int32))
                 ks_grp.create_dataset("semantic_phase", data=np.array(ks_phase, dtype=np.uint8))
+                if "z_entry_descriptor" in keystate:
+                    ks_grp.create_dataset(
+                        "z_entry_descriptor",
+                        data=np.array(ks_z_entry_descriptor, dtype=np.float32),
+                    )
 
         begin += 1
         print(f"proccess {i} success!")

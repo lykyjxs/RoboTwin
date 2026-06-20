@@ -42,6 +42,8 @@ def create_empty_dataset(
     has_velocity: bool = False,
     has_effort: bool = False,
     has_keystate: bool = False,
+    has_z_entry_descriptor: bool = False,
+    z_entry_descriptor_dim: int = 64,
     num_phase_classes: int = 3,
     dataset_config: DatasetConfig = DEFAULT_DATASET_CONFIG,
 ) -> LeRobotDataset:
@@ -134,6 +136,12 @@ def create_empty_dataset(
             "shape": (num_phase_classes, ),
             "names": None,
         }
+        if has_z_entry_descriptor:
+            features["observation.keystate.z_entry_descriptor"] = {
+                "dtype": "float32",
+                "shape": (z_entry_descriptor_dim, ),
+                "names": None,
+            }
 
     if Path(HF_LEROBOT_HOME / repo_id).exists():
         shutil.rmtree(HF_LEROBOT_HOME / repo_id)
@@ -170,6 +178,18 @@ def has_effort(hdf5_files: list[Path]) -> bool:
 def has_keystate(hdf5_files: list[Path]) -> bool:
     with h5py.File(hdf5_files[0], "r") as ep:
         return "/observations/keystate/next_checkpoint_type" in ep
+
+
+def has_z_entry_descriptor(hdf5_files: list[Path]) -> bool:
+    with h5py.File(hdf5_files[0], "r") as ep:
+        return "/observations/keystate/z_entry_descriptor" in ep
+
+
+def get_z_entry_descriptor_dim(hdf5_files: list[Path]) -> int:
+    with h5py.File(hdf5_files[0], "r") as ep:
+        if "/observations/keystate/z_entry_descriptor" not in ep:
+            return 0
+        return int(ep["/observations/keystate/z_entry_descriptor"].shape[-1])
 
 
 def load_raw_images_per_camera(ep: h5py.File, cameras: list[str]) -> dict[str, np.ndarray]:
@@ -227,6 +247,9 @@ def load_raw_episode_data(
                 "semantic_phase": torch.from_numpy(
                     ep["/observations/keystate/semantic_phase"][:].astype(np.float32)),
             }
+            if "/observations/keystate/z_entry_descriptor" in ep:
+                keystate["z_entry_descriptor"] = torch.from_numpy(
+                    ep["/observations/keystate/z_entry_descriptor"][:].astype(np.float32))
 
         imgs_per_cam = load_raw_images_per_camera(
             ep,
@@ -281,6 +304,8 @@ def populate_dataset(
                 frame["observation.keystate.next_checkpoint_type"] = keystate["next_checkpoint_type"][i].reshape(1)
                 frame["observation.keystate.h_entry"] = keystate["h_entry"][i].reshape(1)
                 frame["observation.keystate.semantic_phase"] = keystate["semantic_phase"][i]
+                if "z_entry_descriptor" in keystate:
+                    frame["observation.keystate.z_entry_descriptor"] = keystate["z_entry_descriptor"][i]
             dataset.add_frame(frame)
         dataset.save_episode()
 
@@ -312,6 +337,7 @@ def port_aloha(
             file_path = os.path.join(root, filename)
             hdf5_files.append(file_path)
 
+    z_desc_present = has_z_entry_descriptor(hdf5_files)
     dataset = create_empty_dataset(
         repo_id,
         robot_type="mobile_aloha" if is_mobile else "aloha",
@@ -319,6 +345,8 @@ def port_aloha(
         has_effort=has_effort(hdf5_files),
         has_velocity=has_velocity(hdf5_files),
         has_keystate=has_keystate(hdf5_files),
+        has_z_entry_descriptor=z_desc_present,
+        z_entry_descriptor_dim=get_z_entry_descriptor_dim(hdf5_files) if z_desc_present else 0,
         dataset_config=dataset_config,
     )
     dataset = populate_dataset(

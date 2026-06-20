@@ -100,31 +100,35 @@ class Pi0Config(_model.BaseModelConfig):
     action_horizon: int = 50
     max_token_len: int = 48
 
-    # ---- KeyState heads (Stage 1) ----
+    # ---- KeyState heads ----
     # All default OFF: when every use_* is False, no new params are created and the model is
     # bit-identical to the original pi0 (freeze filter / FSDP / weight load / loss all unchanged).
     use_checkpoint_head: bool = False  # dense next-checkpoint type classification + horizon binning
     use_phase_head: bool = False  # 3-way multi-label semantic phase (BCE)
-    use_z_head: bool = False  # latent KeyState-JEPA head (Stage 2; hard-gated in __post_init__)
-    use_z_hat_zone: bool = False  # reserved Stage 2 interface: future checkpoint-window latent (no params yet)
+    use_z_entry_descriptor: bool = False  # Stage 2 bootstrap descriptor auxiliary prediction
+    use_z_head: bool = False  # reserved for future frozen-Pi0 latent / JEPA-style Stage 2 variant
+    use_z_hat_zone: bool = False  # reserved old Stage 2 interface name; not used by descriptor bootstrap
     use_keystate_fusion: bool = False  # inject keystate condition into action expert (Stage 3; hard-gated)
 
     num_checkpoint_types: int = 3  # configurable vocab: {0:none, 1:pre_grasp, 2:pre_place, ...}
     num_phase_classes: int = 3  # {object_in_hand, lifted, placed_and_released}
-    z_dim: int = 64  # latent dim placeholder (Stage 2)
+    z_entry_descriptor_dim: int = 64  # deterministic bootstrap descriptor dim (Stage 2 plumbing target)
+    z_dim: int = 64  # latent dim placeholder for future learned/frozen-Pi0 Stage 2 variants
     z_hat_zone_dim: int = 64  # reserved latent size for future checkpoint-window representation
     z_h_interaction: str = "none"  # reserved: how z_hat_zone and h_entry will interact in Stage 2
 
     lambda_type: float = 1.0
     lambda_h: float = 1.0
     lambda_ph: float = 1.0
-    lambda_z: float = 0.0
+    lambda_z_entry_descriptor: float = 0.0
+    lambda_z: float = 0.0  # reserved for future learned/frozen-Pi0 z target variants
 
-    # horizon log-spaced bins via upper edges, "h < edge -> that bin" semantics (most intuitive):
-    #   h<3 -> bin0(0,1,2)  h<6 -> bin1(3,4,5)  h<11 -> bin2(6..10)
-    #   h<21 -> bin3(11..20)  h<51 -> bin4(21..50)  else -> bin5(>50)
-    # num_horizon_bins = len(horizon_upper_edges) + 1 = 6
-    horizon_upper_edges: tuple[int, ...] = (3, 6, 11, 21, 51)
+    # h_entry bins via upper edges, "h < edge -> that bin" semantics:
+    #   h==0 -> bin0 (inside checkpoint window)
+    #   1<=h<4 -> bin1 (very near entry)  4<=h<7 -> bin2  7<=h<11 -> bin3
+    #   11<=h<21 -> bin4  21<=h<51 -> bin5  else -> bin6
+    # num_horizon_bins = len(horizon_upper_edges) + 1 = 7
+    horizon_upper_edges: tuple[int, ...] = (1, 4, 7, 11, 21, 51)
     horizon_loss_type: str = "ce"  # "ce" (default, simple to debug) | "ordinal" (CORAL, ablation)
     # Extra per-sample weight for near-checkpoint horizon bins. These bins are sparse but important for
     # entering checkpoint windows safely; default 1.0 preserves baseline loss scaling.
@@ -132,22 +136,29 @@ class Pi0Config(_model.BaseModelConfig):
     horizon_bin1_weight: float = 1.0
 
     def __post_init__(self):
-        # Hard gates: z head (Stage 2) and KeyState->Action fusion (Stage 3) are scaffolded
-        # but NOT implemented this round. Block them at config construction so no config can
-        # silently enable a half-built path.
+        # Keep the paper/future latent and fusion scaffolds hard-gated. The implemented Stage 2 path in
+        # this branch is explicitly a deterministic z_entry_descriptor bootstrap target, not a frozen-Pi0
+        # latent or KeyState->Action fusion.
         if self.use_z_head:
             raise NotImplementedError(
-                "KeyState-JEPA z head needs the EMA encoder / z_target (Stage 2); not implemented this round.")
+                "use_z_head is reserved for a future frozen-Pi0/JEPA z target; use "
+                "use_z_entry_descriptor=True for the Stage 2 bootstrap descriptor path.")
         if self.use_z_hat_zone:
             raise NotImplementedError(
-                "z_hat_zone is a reserved Stage 2 interface for future checkpoint-window latents; "
-                "keep use_z_hat_zone=False until the latent target path is implemented.")
+                "z_hat_zone is a reserved interface name for future checkpoint-window latents; "
+                "use z_entry_descriptor for the Stage 2 bootstrap descriptor path.")
+        if self.z_entry_descriptor_dim <= 0:
+            raise ValueError(f"z_entry_descriptor_dim must be positive, got {self.z_entry_descriptor_dim}")
+        if self.use_z_entry_descriptor and self.lambda_z_entry_descriptor <= 0:
+            raise ValueError(
+                "use_z_entry_descriptor=True requires lambda_z_entry_descriptor > 0 so the descriptor "
+                "head cannot be silently enabled without training signal.")
         if self.z_h_interaction != "none":
             raise NotImplementedError(
-                "z_h_interaction is reserved for Stage 2 z_hat_zone <-> h_entry coupling; keep it 'none'.")
+                "z_h_interaction is reserved for future z_hat_zone <-> h_entry coupling; keep it 'none'.")
         if self.use_keystate_fusion:
             raise NotImplementedError(
-                "KeyState->Action fusion is reserved for Stage 3; keep use_keystate_fusion=False in Stage 1.")
+                "KeyState->Action fusion is reserved for Stage 3; keep use_keystate_fusion=False in Stage 2.")
         if self.horizon_loss_type not in ("ce", "ordinal"):
             raise ValueError(f"horizon_loss_type must be 'ce' or 'ordinal', got {self.horizon_loss_type!r}")
 
@@ -180,6 +191,9 @@ class Pi0Config(_model.BaseModelConfig):
                 state=jax.ShapeDtypeStruct([batch_size, self.action_dim], jnp.float32),
                 tokenized_prompt=jax.ShapeDtypeStruct([batch_size, self.max_token_len], jnp.int32),
                 tokenized_prompt_mask=jax.ShapeDtypeStruct([batch_size, self.max_token_len], bool),
+                keystate_z_entry_descriptor=jax.ShapeDtypeStruct(
+                    [batch_size, self.z_entry_descriptor_dim], jnp.float32)
+                if self.use_z_entry_descriptor else None,
             )
         action_spec = jax.ShapeDtypeStruct([batch_size, self.action_horizon, self.action_dim], jnp.float32)
 
@@ -245,7 +259,7 @@ class Pi0(_model.BaseModel):
         # perception+instruction question -- so they project from paligemma width, not action-expert width.
         pg_w = paligemma_config.width
         ae_w = action_expert_config.width
-        n_bins = len(config.horizon_upper_edges) + 1  # = 6
+        n_bins = len(config.horizon_upper_edges) + 1
         if config.use_checkpoint_head:
             self.ks_type_head = nnx.Linear(pg_w, config.num_checkpoint_types, rngs=rngs)
             # head output dim depends on loss mode: ce -> n_bins class logits; ordinal(CORAL) -> n_bins-1 cumulative logits
@@ -253,9 +267,11 @@ class Pi0(_model.BaseModel):
             self.ks_horizon_head = nnx.Linear(pg_w, h_out, rngs=rngs)
         if config.use_phase_head:
             self.ks_phase_head = nnx.Linear(pg_w, config.num_phase_classes, rngs=rngs)
-        # The two branches below are hard-gated off in Pi0Config.__post_init__ this round; the
-        # scaffold is kept for Stage 2 (z head) / Stage 3 (fusion) reuse and review.
-        if config.use_z_head:  # Stage 2 placeholder (loss not implemented this round)
+        # The descriptor branch is Stage 2: predict a z_entry key-state latent target from
+        # action-expert hidden, keeping it auxiliary (not fed back into action generation here).
+        if config.use_z_entry_descriptor:
+            self.ks_z_entry_descriptor_head = nnx.Linear(ae_w, config.z_entry_descriptor_dim, rngs=rngs)
+        if config.use_z_head:  # Future frozen-Pi0/JEPA target path; hard-gated in Pi0Config.__post_init__.
             self.ks_z_head = nnx.Linear(pg_w, config.z_dim, rngs=rngs)
         if config.use_keystate_fusion:  # Stage 3 placeholder
             self.ks_type_embed = nnx.Embed(config.num_checkpoint_types, ae_w, rngs=rngs)
@@ -369,15 +385,19 @@ class Pi0(_model.BaseModel):
         v_t = self.action_out_proj(suffix_out[:, -self.action_horizon:])
         flow_loss = jnp.mean(jnp.square(v_t - u_t), axis=-1)
 
-        ks_losses = self._keystate_losses(prefix_out, prefix_mask, observation)
+        ks_losses = self._keystate_losses(prefix_out, prefix_mask, suffix_out, observation)
         return flow_loss, ks_losses
 
-    def _keystate_losses(self, prefix_out, prefix_mask, obs) -> dict[str, at.Array]:
-        """KeyState auxiliary losses (Stage 1). Returns {} for baseline / when labels absent,
+    def _keystate_losses(self, prefix_out, prefix_mask, suffix_out, obs) -> dict[str, at.Array]:
+        """KeyState auxiliary losses. Returns {} for baseline / when labels absent,
         so train.py's `sum(ks_losses.values())` is a no-op and behaviour is unchanged."""
         ks_losses: dict[str, at.Array] = {}
-        need_ks = self._ks.use_checkpoint_head or self._ks.use_phase_head
-        if not need_ks or obs.keystate_h_entry is None:  # None => baseline / fake data: skip entirely
+        need_ks = self._ks.use_checkpoint_head or self._ks.use_phase_head or self._ks.use_z_entry_descriptor
+        if not need_ks:
+            return ks_losses
+        if obs.keystate_h_entry is None or obs.keystate_type is None:
+            if self._ks.use_z_entry_descriptor:
+                raise ValueError("Stage2 descriptor training requires keystate_type and keystate_h_entry labels.")
             return ks_losses
 
         # masked-mean pool over the prefix (VLM) tokens -> [b, pg_w]
@@ -387,7 +407,7 @@ class Pi0(_model.BaseModel):
         #   * type is meaningful on every labeled frame, including terminal/no-next-checkpoint
         #     frames where keystate_type == 0 ("none"). This matters for execution: the
         #     model must learn to say "no next checkpoint" instead of freely predicting 1/2.
-        #   * horizon is meaningful only when a future/current checkpoint target exists.
+        #   * horizon/descriptor are meaningful only when a future/current checkpoint target exists.
         type_valid_b = obs.keystate_type >= 0
         h_valid_b = obs.keystate_h_entry >= 0  # [b] bool
 
@@ -402,7 +422,7 @@ class Pi0(_model.BaseModel):
             type_ce = _softmax_xent(self.ks_type_head(pooled), type_label)
             ks_losses["loss_type"] = self._ks.lambda_type * masked_mean(type_ce, type_valid_b)
 
-            h_label = jnp.where(h_valid_b, obs.keystate_h_entry, 0)  # bucket index 0..5; safe 0 for invalid
+            h_label = jnp.where(h_valid_b, obs.keystate_h_entry, 0)  # bucket index 0..num_horizon_bins-1; safe 0 for invalid
             h_logits = self.ks_horizon_head(pooled)
             if self._ks.horizon_loss_type == "ce":
                 h_loss = _softmax_xent(h_logits, h_label)
@@ -420,8 +440,20 @@ class Pi0(_model.BaseModel):
             phase_bce = _sigmoid_bce(self.ks_phase_head(pooled), obs.keystate_phase)
             ks_losses["loss_ph"] = self._ks.lambda_ph * jnp.mean(phase_bce)
 
-        # Note: z head loss is NOT implemented this round (needs Stage 2 EMA encoder / z_target);
-        # use_z_head=True already raises in Pi0Config.__post_init__.
+        if self._ks.use_z_entry_descriptor:
+            if obs.keystate_z_entry_descriptor is None:
+                raise ValueError(
+                    "use_z_entry_descriptor=True but Observation.keystate_z_entry_descriptor is missing. "
+                    "Generate /keystate/z_entry_descriptor, process it, and include it in the Stage2 repack transform.")
+            z_target = jax.lax.stop_gradient(obs.keystate_z_entry_descriptor)
+            z_pooled = jnp.mean(suffix_out[:, -self.action_horizon:], axis=1)
+            z_pred = self.ks_z_entry_descriptor_head(z_pooled)
+            per_sample_z = jnp.mean(jnp.square(z_pred - z_target), axis=-1)
+            target_nonzero = jnp.linalg.norm(z_target, axis=-1) > 1e-6
+            z_valid = (obs.keystate_type > 0) & h_valid_b & target_nonzero
+            ks_losses["loss_z_entry_descriptor"] = self._ks.lambda_z_entry_descriptor * masked_mean(per_sample_z,
+                                                                                                      z_valid)
+
         return ks_losses
 
     @override
