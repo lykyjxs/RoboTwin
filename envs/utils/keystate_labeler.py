@@ -6,26 +6,18 @@ Reads the per-frame substep tags that were passively logged during data collecti
 and derives checkpoint-window labels by looking up a FIXED semantic mapping table --
 no human/VLM observation, no thresholds for the checkpoint windows.
 
-For place_a2b_left, play_once() always emits this fixed sequence of Actions:
-    move(grasp_actor)          -> [move(pre_grasp), move(grasp), close]   stage="grasp"
-    move(move_by_displacement) -> [move(lift)]                           stage="lift"
-    move(place_actor)          -> [move(place_pre), move(place), open]   stage="place"
-
-Window mapping:
-    pre_grasp window: old pre_grasp frame -> grasp confirmed / object-in-hand frame
-    pre_place window: old pre_place frame -> released / placed-and-released frame
-
-Output: writes a /keystate group back into each episode hdf5 (idempotent) plus a
-JSON sidecar at <data_root>/<task>/<config>/keystate/episode{N}.json.
-
 Canonical Stage 1 supervision fields:
     next_checkpoint_type  int8  (T,)    0=none / 1=pre_grasp_window / 2=pre_place_window
     h_entry               int32 (T,)    distance to checkpoint-window entry; 0 inside window; -1=no next/current window
     semantic_phase        uint8 (T,3)   object_in_hand / lifted / placed_and_released
 
+Supported task mappings:
+    place_a2b_left:       single pick/place cycle (backward-compatible with v3 labels)
+    stack_bowls_three:    three repeated pick/place cycles, sharing the same dense fields
+
 Usage:
     python envs/utils/keystate_labeler.py --task place_a2b_left --config demo_clean --all
-    python envs/utils/keystate_labeler.py --task place_a2b_left --config demo_clean --episode 0
+    python envs/utils/keystate_labeler.py --task stack_bowls_three --config demo_clean --episode 0
 """
 import argparse
 import json
@@ -34,7 +26,7 @@ import os
 import h5py
 import numpy as np
 
-LABELER_VERSION = 3  # v3: checkpoint windows + h_entry; no h_ckpt/checkpoint_type compatibility fields
+LABELER_VERSION = 4  # v4: task dispatch + multi-cycle windows; v3 fields remain unchanged
 
 # Inverse of Base_Task.KEYSTATE_*_CODES (kept in sync with envs/_base_task.py).
 STAGE_DECODE = {0: None, 1: "grasp", 2: "lift", 3: "place"}
@@ -62,71 +54,159 @@ def _read_episode(hdf5_path):
             "right_endpose": f["/endpose/right_endpose"][()],
             "left_gripper": np.atleast_1d(f["/endpose/left_gripper"][()]).astype(np.float64),
             "right_gripper": np.atleast_1d(f["/endpose/right_gripper"][()]).astype(np.float64),
+            "object_poses": {},
         }
         if "object_pose" in f:
-            data["object_pose"] = f["/object_pose/object"][()]
-            data["target_object_pose"] = f["/object_pose/target_object"][()]
+            for name, ds in f["object_pose"].items():
+                data["object_poses"][name] = ds[()]
+            data["object_pose"] = data["object_poses"].get("object")
+            data["target_object_pose"] = data["object_poses"].get("target_object")
         else:
             data["object_pose"] = None
             data["target_object_pose"] = None
     return data
 
 
-def _segment_end_frame(stage_codes, action_codes, sub_indices, stage_name, sub_index, action_name):
-    """Last frame index whose substep tag matches (stage, sub_index, action). -1 if none.
+def _code_for(mapping, name):
+    return next(k for k, v in mapping.items() if v == name)
 
-    A single Action spans several saved frames; we want the LAST frame of that span,
-    i.e. the moment that Action finished.
-    """
-    stage_c = next(k for k, v in STAGE_DECODE.items() if v == stage_name)
-    action_c = next(k for k, v in ACTION_DECODE.items() if v == action_name)
-    mask = (stage_codes == stage_c) & (action_codes == action_c) & (sub_indices == sub_index)
-    idx = np.nonzero(mask)[0]
+
+def _segment_end_frame(stage_codes, action_codes, sub_indices, stage_name, sub_index, action_name):
+    """Last frame index whose substep tag matches (stage, sub_index, action). -1 if none."""
+    idx = _segment_end_frames(stage_codes, action_codes, sub_indices, stage_name, sub_index, action_name)
     return int(idx[-1]) if idx.size else -1
 
 
-def _fill_window_targets(next_checkpoint_type, h_entry, window_start, window_end, window_type, flags, name):
-    if window_start < 0 or window_end < 0:
-        return
-    if window_end < window_start:
-        flags.append(f"{name}_window_end_before_start")
-        return
-    # Before the window, target the entry. Inside the window, h_entry=0 and the type remains active.
-    for t in range(window_start + 1):
-        if next_checkpoint_type[t] == 0:
-            next_checkpoint_type[t] = window_type
-            h_entry[t] = window_start - t
-    next_checkpoint_type[window_start:window_end + 1] = window_type
-    h_entry[window_start:window_end + 1] = 0
+def _segment_start_frames(stage_codes, action_codes, sub_indices, stage_name, sub_index, action_name):
+    """Start frame of every contiguous span matching (stage, sub_index, action)."""
+    stage_c = _code_for(STAGE_DECODE, stage_name)
+    action_c = _code_for(ACTION_DECODE, action_name)
+    mask = (stage_codes == stage_c) & (action_codes == action_c) & (sub_indices == sub_index)
+    idx = np.nonzero(mask)[0]
+    if not idx.size:
+        return np.array([], dtype=np.int64)
+
+    breaks = np.nonzero(np.diff(idx) > 1)[0]
+    starts = np.concatenate([idx[:1], idx[breaks + 1]])
+    return starts.astype(np.int64)
 
 
-def label_episode(data):
-    """Apply the fixed mapping table. Returns (labels_dict, flags_list)."""
-    sc, ac, si = data["stage_code"], data["action_code"], data["sub_index"]
-    T = sc.shape[0]
-    flags = []
+def _segment_end_frames(stage_codes, action_codes, sub_indices, stage_name, sub_index, action_name):
+    """End frame of every contiguous span matching (stage, sub_index, action)."""
+    stage_c = _code_for(STAGE_DECODE, stage_name)
+    action_c = _code_for(ACTION_DECODE, action_name)
+    mask = (stage_codes == stage_c) & (action_codes == action_c) & (sub_indices == sub_index)
+    idx = np.nonzero(mask)[0]
+    if not idx.size:
+        return np.array([], dtype=np.int64)
 
-    # active arm: from the substep arm_code (the arm that actually executed tagged actions)
+    breaks = np.nonzero(np.diff(idx) > 1)[0]
+    ends = np.concatenate([idx[breaks], idx[-1:]])
+    return ends.astype(np.int64)
+
+
+def _active_arm(data):
     arm_codes_active = data["arm_code"][data["arm_code"] != 0]
     if arm_codes_active.size:
         arm_code = int(np.bincount(arm_codes_active).argmax())
-        arm = ARM_DECODE[arm_code]
-    else:
-        arm = None
-        flags.append("no_arm_in_substep")
+        return ARM_DECODE[arm_code], []
+    return None, ["no_arm_in_substep"]
 
-    # Old point checkpoints = end of the first move in grasp/place. Window entry starts here.
+
+def _window_json(windows):
+    return [{
+        "cycle": int(w.get("cycle", -1)),
+        "name": str(w["name"]),
+        "type": int(w["type"]),
+        "start": int(w["start"]),
+        "entry": int(w.get("entry", w["start"])),
+        "end": int(w["end"]),
+        "actor": str(w.get("actor", "")),
+    } for w in windows]
+
+
+def build_labels_from_ordered_windows(T, windows, object_in_hand, lifted, placed_and_released, flags):
+    """Build dense current-or-next checkpoint labels from time-ordered windows."""
+    next_checkpoint_type = np.zeros(T, dtype=np.int8)
+    h_entry = np.full(T, -1, dtype=np.int32)
+    cycle_id = np.full(T, -1, dtype=np.int16)
+    window_id = np.full(T, -1, dtype=np.int16)
+
+    valid_windows = []
+    for i, w in enumerate(windows):
+        start = int(w["start"])
+        end = int(w["end"])
+        if start < 0 or end < 0:
+            flags.append(f"{w['name']}_cycle{w.get('cycle', -1)}_missing_boundary")
+            continue
+        if end < start:
+            flags.append(f"{w['name']}_cycle{w.get('cycle', -1)}_end_before_start")
+            continue
+        if start >= T:
+            flags.append(f"{w['name']}_cycle{w.get('cycle', -1)}_start_oob")
+            continue
+        if end >= T:
+            flags.append(f"{w['name']}_cycle{w.get('cycle', -1)}_end_oob")
+            end = T - 1
+            w = dict(w, end=end)
+        valid_windows.append((i, w))
+
+    valid_windows.sort(key=lambda item: int(item[1]["start"]))
+    for (prev_i, prev), (cur_i, cur) in zip(valid_windows, valid_windows[1:]):
+        if int(prev["end"]) >= int(cur["start"]):
+            flags.append(f"window_overlap_{prev['name']}{prev.get('cycle', -1)}_{cur['name']}{cur.get('cycle', -1)}")
+        if int(prev["start"]) >= int(cur["start"]):
+            flags.append("window_order_violation")
+
+    for ordinal, (original_id, w) in enumerate(valid_windows):
+        start = int(w["start"])
+        end = int(w["end"])
+        prev_end = int(valid_windows[ordinal - 1][1]["end"]) if ordinal > 0 else -1
+        pre_start = max(prev_end + 1, 0)
+        if pre_start < start:
+            pre = np.arange(pre_start, start)
+            next_checkpoint_type[pre] = int(w["type"])
+            h_entry[pre] = start - pre
+            cycle_id[pre] = int(w.get("cycle", -1))
+            window_id[pre] = original_id
+
+        win = np.arange(start, end + 1)
+        next_checkpoint_type[win] = int(w["type"])
+        h_entry[win] = 0
+        cycle_id[win] = int(w.get("cycle", -1))
+        window_id[win] = original_id
+
+    semantic_phase = np.stack([object_in_hand, lifted, placed_and_released], axis=1).astype(np.uint8)
+    return {
+        "next_checkpoint_type": next_checkpoint_type,
+        "h_entry": h_entry,
+        "object_in_hand": object_in_hand,
+        "lifted": lifted,
+        "placed_and_released": placed_and_released,
+        "semantic_phase": semantic_phase,
+        "cycle_id": cycle_id,
+        "window_id": window_id,
+    }
+
+
+def label_single_cycle_pick_place(data, task=None):
+    """Backward-compatible single pick/place mapping used by place_a2b_left."""
+    sc, ac, si = data["stage_code"], data["action_code"], data["sub_index"]
+    T = sc.shape[0]
+    flags = []
+    arm, arm_flags = _active_arm(data)
+    flags.extend(arm_flags)
+
     pre_grasp_idx = _segment_end_frame(sc, ac, si, "grasp", 1, "move")
     pre_place_idx = _segment_end_frame(sc, ac, si, "place", 1, "move")
+    close_end = _segment_end_frame(sc, ac, si, "grasp", 3, "gripper_close")
+    lift_end = _segment_end_frame(sc, ac, si, "lift", 1, "move")
+    open_end = _segment_end_frame(sc, ac, si, "place", 3, "gripper_open")
+
     if pre_grasp_idx < 0:
         flags.append("no_pre_grasp")
     if pre_place_idx < 0:
         flags.append("no_pre_place")
-
-    # Confirmation / phase boundaries.
-    close_end = _segment_end_frame(sc, ac, si, "grasp", 3, "gripper_close")
-    lift_end = _segment_end_frame(sc, ac, si, "lift", 1, "move")
-    open_end = _segment_end_frame(sc, ac, si, "place", 3, "gripper_open")
     if close_end < 0:
         flags.append("no_grasp_close")
     if lift_end < 0:
@@ -138,81 +218,188 @@ def label_episode(data):
     lifted = np.zeros(T, dtype=np.uint8)
     placed_and_released = np.zeros(T, dtype=np.uint8)
 
-    # object-in-hand: from end of grasp-close until end of place-open (release)
     if close_end >= 0:
         end = open_end if open_end >= 0 else T - 1
         object_in_hand[close_end:end + 1] = 1
-    # lifted: from end of lift move onward (until release)
     if lift_end >= 0:
         end = open_end if open_end >= 0 else T - 1
         lifted[lift_end:end + 1] = 1
-    # placed-and-released: from end of place-open onward
     if open_end >= 0:
         placed_and_released[open_end:] = 1
 
-    # --- cross-check `lifted` against object z, if object_pose available ---
+    resting_z = float("nan")
     if data["object_pose"] is not None and T >= 1:
         obj_z = data["object_pose"][:, 2]
         resting_z = float(np.median(obj_z[:min(3, T)]))
         z_lifted = (obj_z - resting_z) > LIFT_THRESHOLD
-        # if the script says lifted but z never rises (or vice versa), flag for spot-check
         if lift_end >= 0 and not bool(z_lifted[lift_end:open_end if open_end >= 0 else T].any()):
             flags.append("lifted_z_mismatch")
-    else:
-        resting_z = float("nan")
 
-    # --- checkpoint-window supervision fields ---
-    # pre_grasp window: old pre_grasp frame -> grasp confirmed / object-in-hand frame.
-    # pre_place window: old pre_place frame -> released / placed-and-released frame.
     pre_grasp_window_start = pre_grasp_idx
     pre_grasp_window_end = close_end
     pre_place_window_start = pre_place_idx
     pre_place_window_end = open_end
-
     if pre_grasp_window_start >= 0 and pre_grasp_window_end >= 0 and pre_place_window_start >= 0:
         if pre_grasp_window_end >= pre_place_window_start:
             flags.append("pre_grasp_window_overlaps_pre_place")
             pre_grasp_window_end = pre_place_window_start - 1
 
-    next_checkpoint_type = np.zeros(T, dtype=np.int8)
-    h_entry = np.full(T, -1, dtype=np.int32)
-    _fill_window_targets(next_checkpoint_type, h_entry, pre_grasp_window_start, pre_grasp_window_end, 1, flags,
-                         "pre_grasp")
-    _fill_window_targets(next_checkpoint_type, h_entry, pre_place_window_start, pre_place_window_end, 2, flags,
-                         "pre_place")
+    windows = [
+        {"name": "pre_grasp", "type": 1, "cycle": 0, "start": pre_grasp_window_start, "entry": pre_grasp_window_start, "end": pre_grasp_window_end, "actor": "object"},
+        {"name": "pre_place", "type": 2, "cycle": 0, "start": pre_place_window_start, "entry": pre_place_window_start, "end": pre_place_window_end, "actor": "object"},
+    ]
+    labels = build_labels_from_ordered_windows(T, windows, object_in_hand, lifted, placed_and_released, flags)
 
-    semantic_phase = np.stack([object_in_hand, lifted, placed_and_released], axis=1).astype(np.uint8)
-
-    # ordering sanity (non-fatal)
     if pre_grasp_idx >= 0 and pre_place_idx >= 0 and not (pre_grasp_idx < pre_place_idx):
         flags.append("checkpoint_order_violation")
 
-    labels = {
-        "next_checkpoint_type": next_checkpoint_type,
-        "h_entry": h_entry,
-        "object_in_hand": object_in_hand,
-        "lifted": lifted,
-        "placed_and_released": placed_and_released,
-        "semantic_phase": semantic_phase,
-        "_attrs": {
-            "arm": arm if arm is not None else "unknown",
-            "pre_grasp_idx": pre_grasp_idx,
-            "pre_grasp_window_start": pre_grasp_window_start,
-            "pre_grasp_window_end": pre_grasp_window_end,
-            "pre_place_idx": pre_place_idx,
-            "pre_place_window_start": pre_place_window_start,
-            "pre_place_window_end": pre_place_window_end,
-            "grasp_close_end": close_end,
-            "lift_end": lift_end,
-            "place_open_end": open_end,
-            "resting_z": resting_z,
-            "lift_threshold": LIFT_THRESHOLD,
-            "T": int(T),
-            "labeler_version": LABELER_VERSION,
-            "flags": flags,
-        },
+    labels["_attrs"] = {
+        "task": task or "single_cycle_pick_place",
+        "arm": arm if arm is not None else "unknown",
+        "pre_grasp_idx": pre_grasp_idx,
+        "pre_grasp_window_start": pre_grasp_window_start,
+        "pre_grasp_window_end": pre_grasp_window_end,
+        "pre_place_idx": pre_place_idx,
+        "pre_place_window_start": pre_place_window_start,
+        "pre_place_window_end": pre_place_window_end,
+        "grasp_close_end": close_end,
+        "lift_end": lift_end,
+        "place_open_end": open_end,
+        "num_cycles": 1,
+        "checkpoint_windows_json": _window_json(windows),
+        "resting_z": resting_z,
+        "lift_threshold": LIFT_THRESHOLD,
+        "T": int(T),
+        "labeler_version": LABELER_VERSION,
+        "flags": flags,
     }
     return labels, flags
+
+
+def label_multi_cycle_stack_bowls(data):
+    """Task-specific mapping for stack_bowls_three's three repeated bowl transfers."""
+    sc, ac, si = data["stage_code"], data["action_code"], data["sub_index"]
+    T = sc.shape[0]
+    flags = []
+    arm, arm_flags = _active_arm(data)
+    flags.extend(arm_flags)
+
+    pre_grasp = _segment_end_frames(sc, ac, si, "grasp", 1, "move")
+    close_end = _segment_end_frames(sc, ac, si, "grasp", 3, "gripper_close")
+    lift_start = _segment_start_frames(sc, ac, si, "lift", 1, "move")
+    lift_end = _segment_end_frames(sc, ac, si, "lift", 1, "move")
+    pre_place = _segment_end_frames(sc, ac, si, "place", 1, "move")
+    open_start = _segment_start_frames(sc, ac, si, "place", 3, "gripper_open")
+    open_end = _segment_end_frames(sc, ac, si, "place", 3, "gripper_open")
+
+    expected = 3
+    counts = {
+        "pre_grasp": len(pre_grasp),
+        "grasp_close": len(close_end),
+        "lift": len(lift_end),
+        "lift_start": len(lift_start),
+        "pre_place": len(pre_place),
+        "place_open": len(open_end),
+        "place_open_start": len(open_start),
+    }
+    for name, count in counts.items():
+        if count != expected:
+            flags.append(f"expected_3_{name}_got_{count}")
+
+    cycles = min(expected, len(pre_grasp), len(close_end), len(lift_start), len(lift_end), len(pre_place), len(open_start), len(open_end))
+    actors = ["bowl1", "bowl2", "bowl3"]
+    windows = []
+    for cycle in range(cycles):
+        windows.append({
+            "name": "pre_grasp",
+            "type": 1,
+            "cycle": cycle,
+            "start": int(pre_grasp[cycle]),
+            "entry": int(pre_grasp[cycle]),
+            "end": int(close_end[cycle]),
+            "actor": actors[cycle],
+        })
+        windows.append({
+            "name": "pre_place",
+            "type": 2,
+            "cycle": cycle,
+            "start": int(pre_place[cycle]),
+            "entry": int(pre_place[cycle]),
+            "end": int(open_end[cycle]),
+            "actor": actors[cycle],
+        })
+
+    expected_names = ["pre_grasp", "pre_place", "pre_grasp", "pre_place", "pre_grasp", "pre_place"]
+    if len(windows) == 6:
+        starts = [int(w["start"]) for w in windows]
+        names = [w["name"] for w in windows]
+        if names != expected_names or any(a >= b for a, b in zip(starts, starts[1:])):
+            flags.append("stack_bowls_window_order_violation")
+    else:
+        flags.append(f"stack_bowls_incomplete_windows_{len(windows)}")
+
+    object_in_hand = np.zeros(T, dtype=np.uint8)
+    lifted = np.zeros(T, dtype=np.uint8)
+    placed_and_released = np.zeros(T, dtype=np.uint8)
+    for cycle in range(cycles):
+        release_start = int(open_start[cycle])
+        release_end = int(open_end[cycle])
+        next_pre_grasp = int(pre_grasp[cycle + 1]) if cycle + 1 < cycles else T
+        if close_end[cycle] >= 0:
+            object_in_hand[int(close_end[cycle]):release_end + 1] = 1
+        if lift_start[cycle] >= 0:
+            lifted[int(lift_start[cycle]):release_end + 1] = 1
+        placed_and_released[release_start:next_pre_grasp] = 1
+
+    resting_z = float("nan")
+    missing_poses = [name for name in actors if name not in data["object_poses"]]
+    if missing_poses:
+        flags.append("missing_object_pose_" + ",".join(missing_poses))
+    else:
+        rests = []
+        for cycle, actor in enumerate(actors[:cycles]):
+            obj_z = data["object_poses"][actor][:, 2]
+            rest = float(np.median(obj_z[:min(3, T)]))
+            rests.append(rest)
+            if cycle < len(lift_end) and cycle < len(open_end):
+                z_lifted = (obj_z - rest) > LIFT_THRESHOLD
+                if not bool(z_lifted[int(lift_end[cycle]):int(open_end[cycle])].any()):
+                    flags.append(f"{actor}_lifted_z_mismatch")
+        if rests:
+            resting_z = float(np.mean(rests))
+
+    labels = build_labels_from_ordered_windows(T, windows, object_in_hand, lifted, placed_and_released, flags)
+    labels["_attrs"] = {
+        "task": "stack_bowls_three",
+        "arm": arm if arm is not None else "unknown",
+        "num_cycles": int(cycles),
+        "expected_cycles": expected,
+        "checkpoint_windows_json": _window_json(windows),
+        "stack_bowls_counts": counts,
+        "pre_grasp_indices": [int(x) for x in pre_grasp],
+        "grasp_close_ends": [int(x) for x in close_end],
+        "lift_starts": [int(x) for x in lift_start],
+        "lift_ends": [int(x) for x in lift_end],
+        "pre_place_indices": [int(x) for x in pre_place],
+        "place_open_starts": [int(x) for x in open_start],
+        "place_open_ends": [int(x) for x in open_end],
+        "resting_z": resting_z,
+        "lift_threshold": LIFT_THRESHOLD,
+        "T": int(T),
+        "labeler_version": LABELER_VERSION,
+        "flags": flags,
+    }
+    return labels, flags
+
+
+def label_episode(data, task="place_a2b_left"):
+    if task == "stack_bowls_three":
+        return label_multi_cycle_stack_bowls(data)
+    if task == "place_a2b_left":
+        return label_single_cycle_pick_place(data, task=task)
+    raise ValueError(
+        f"No KeyState Stage0 mapping registered for task={task!r}. "
+        "Add a task-specific labeler instead of silently reusing the wrong mapping.")
 
 
 def _write_back(hdf5_path, labels):
@@ -225,7 +412,7 @@ def _write_back(hdf5_path, labels):
                 continue
             grp.create_dataset(k, data=v)
         for ak, av in labels["_attrs"].items():
-            if isinstance(av, list):
+            if isinstance(av, (list, dict)):
                 grp.attrs[ak] = json.dumps(av)
             else:
                 grp.attrs[ak] = av
@@ -253,14 +440,19 @@ def process(task, config, data_root, episodes):
             continue
         try:
             data = _read_episode(hdf5_path)
-            labels, flags = label_episode(data)
+            labels, flags = label_episode(data, task=task)
             _write_back(hdf5_path, labels)
             _write_sidecar(os.path.join(sidecar_dir, f"episode{ep}.json"), ep, labels)
             a = labels["_attrs"]
             note = f" FLAGS={flags}" if flags else ""
-            print(f"[ok]   episode{ep}: arm={a['arm']} pre_grasp=[{a['pre_grasp_window_start']},"
-                  f"{a['pre_grasp_window_end']}] pre_place=[{a['pre_place_window_start']},"
-                  f"{a['pre_place_window_end']}] T={a['T']}{note}")
+            if task == "stack_bowls_three":
+                windows = a.get("checkpoint_windows_json", [])
+                win_s = ", ".join(f"c{w['cycle']}:{w['name']}=[{w['start']},{w['end']}]" for w in windows)
+                print(f"[ok]   episode{ep}: cycles={a['num_cycles']} {win_s} T={a['T']}{note}")
+            else:
+                print(f"[ok]   episode{ep}: arm={a['arm']} pre_grasp=[{a['pre_grasp_window_start']},"
+                      f"{a['pre_grasp_window_end']}] pre_place=[{a['pre_place_window_start']},"
+                      f"{a['pre_place_window_end']}] T={a['T']}{note}")
             summary["ok"] += 1
             if flags:
                 summary["flagged"] += 1

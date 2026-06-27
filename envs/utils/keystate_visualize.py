@@ -1,19 +1,12 @@
 """
 KeyState Stage 0 visualizer (read-only on the hdf5; only writes new png/mp4 artifacts).
 
-Two outputs per episode, for human spot-checking the checkpoint-window labels produced by
-`envs/utils/keystate_labeler.py`:
+Outputs per episode:
+  1. Curve plot (keystate/plots/episode{N}.png)
+  2. Annotated mp4 (keystate/video_annot/episode{N}.mp4)
 
-  1. Curve plot (keystate/plots/episode{N}.png):
-       active-arm gripper value, object z, EE speed, `next_checkpoint_type`, and `h_entry`,
-       with shaded pre_grasp/pre_place checkpoint windows plus semantic phases.
-  2. Annotated mp4 (keystate/video_annot/episode{N}.mp4):
-       head_camera frames with a text banner of current type/h_entry/phases and a border
-       while inside a checkpoint window. Frame t of the video == label t (1:1).
-
-Usage:
-    python envs/utils/keystate_visualize.py --task place_a2b_left --config demo_clean --all
-    python envs/utils/keystate_visualize.py --task place_a2b_left --config demo_clean --episode 0 --no-video
+For stack_bowls_three, the video overlay includes frame_id, cycle_id, window name,
+type, h_entry, h_entry_bin, semantic_phase, and raw stage_tag/sub_index/action_type.
 """
 import argparse
 import json
@@ -27,8 +20,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
-# Load the two lightweight sibling utils directly by file path, so this script never
-# triggers envs/utils/__init__.py (which chain-imports sapien + asset-dependent modules).
+# Load lightweight sibling utils directly by file path, so this script never
+# triggers envs/utils/__init__.py (which chain-imports sapien + asset modules).
 import importlib.util as _ilu  # noqa: E402
 
 _here = os.path.dirname(os.path.abspath(__file__))
@@ -48,6 +41,41 @@ DT = 15.0 / 250.0
 TYPE_NAMES = {0: "none", 1: "pre_grasp", 2: "pre_place"}
 TYPE_COLORS = {1: "tab:green", 2: "tab:orange"}
 TYPE_BGR = {1: (0, 255, 0), 2: (0, 165, 255)}
+STAGE_DECODE = {0: None, 1: "grasp", 2: "lift", 3: "place"}
+ACTION_DECODE = {0: None, 1: "move", 2: "gripper_close", 3: "gripper_open"}
+ARM_DECODE = {0: None, 1: "left", 2: "right"}
+
+
+def _maybe_json(v, default=None):
+    if default is None:
+        default = []
+    if isinstance(v, bytes):
+        v = v.decode("utf-8")
+    if isinstance(v, str):
+        try:
+            return json.loads(v)
+        except json.JSONDecodeError:
+            return default
+    return v if v is not None else default
+
+
+def _h_entry_bin(h):
+    h = int(h)
+    if h < 0:
+        return "invalid"
+    if h == 0:
+        return "bin0"
+    if h < 4:
+        return "bin1"
+    if h < 7:
+        return "bin2"
+    if h < 11:
+        return "bin3"
+    if h < 21:
+        return "bin4"
+    if h < 51:
+        return "bin5"
+    return "bin6"
 
 
 def _load(hdf5_path):
@@ -68,14 +96,34 @@ def _load(hdf5_path):
             "lifted": ks["lifted"][()] if "lifted" in ks else sem[:, 1],
             "placed_and_released": ks["placed_and_released"][()] if "placed_and_released" in ks else sem[:, 2],
             "semantic_phase": sem,
+            "cycle_id": ks["cycle_id"][()] if "cycle_id" in ks else None,
+            "window_id": ks["window_id"][()] if "window_id" in ks else None,
             "attrs": attrs,
+            "windows": _maybe_json(attrs.get("checkpoint_windows_json", "[]"), []),
             "left_endpose": f["/endpose/left_endpose"][()],
             "right_endpose": f["/endpose/right_endpose"][()],
             "left_gripper": np.atleast_1d(f["/endpose/left_gripper"][()]).astype(float),
             "right_gripper": np.atleast_1d(f["/endpose/right_gripper"][()]).astype(float),
+            "object_poses": {},
         }
-        d["object_pose"] = f["/object_pose/object"][()] if "object_pose" in f else None
-        # head camera rgb (JPEG-encoded), decoded lazily only when video requested
+        if "object_pose" in f:
+            for name, ds in f["object_pose"].items():
+                d["object_poses"][name] = ds[()]
+        d["object_pose"] = d["object_poses"].get("object")
+
+        if "keystate_substep" in f:
+            ss = f["keystate_substep"]
+            d["stage_code"] = ss["stage_code"][()].astype(np.int64)
+            d["sub_index"] = ss["sub_index"][()].astype(np.int64)
+            d["action_code"] = ss["action_code"][()].astype(np.int64)
+            d["arm_code"] = ss["arm_code"][()].astype(np.int64)
+        else:
+            T = len(d["next_checkpoint_type"])
+            d["stage_code"] = np.zeros(T, dtype=np.int64)
+            d["sub_index"] = np.zeros(T, dtype=np.int64)
+            d["action_code"] = np.zeros(T, dtype=np.int64)
+            d["arm_code"] = np.zeros(T, dtype=np.int64)
+
         d["_rgb_raw"] = f["/observation/head_camera/rgb"][()] if "observation" in f else None
     return d
 
@@ -88,7 +136,6 @@ def _ee_speed(endpose):
 
 
 def _span(ax, mask, color, label, alpha=0.15):
-    """Shade contiguous regions where mask==1."""
     on = np.asarray(mask).astype(bool)
     if not on.any():
         return
@@ -114,11 +161,16 @@ def _shade_windows(ax, d):
     _span(ax, _window_mask(d, 2), TYPE_COLORS[2], "pre_place window", alpha=0.20)
 
 
+def _active_arm(d):
+    arm = d["attrs"].get("arm", "left")
+    return arm if arm in ("left", "right") else "left"
+
+
 def plot_curves(d, out_path, ep):
     a = d["attrs"]
-    arm = a.get("arm", "left")
-    g = d[f"{arm}_gripper"] if arm in ("left", "right") else d["left_gripper"]
-    ee = d[f"{arm}_endpose"] if arm in ("left", "right") else d["left_endpose"]
+    arm = _active_arm(d)
+    g = d[f"{arm}_gripper"]
+    ee = d[f"{arm}_endpose"]
     ee_sp = _ee_speed(ee)
     T = len(g)
     x = np.arange(T)
@@ -138,12 +190,15 @@ def plot_curves(d, out_path, ep):
 
     ax = axes[1]
     if d["object_pose"] is not None:
-        oz = d["object_pose"][:, 2]
-        ax.plot(x, oz, "m-", label="object z")
-        rz = a.get("resting_z", float("nan"))
-        if rz == rz:  # not nan
-            ax.axhline(rz, color="gray", ls=":", lw=0.8)
-            ax.axhline(rz + a.get("lift_threshold", 0.03), color="green", ls=":", lw=0.8)
+        ax.plot(x, d["object_pose"][:, 2], "m-", label="object z")
+    else:
+        for name in ["bowl1", "bowl2", "bowl3"]:
+            if name in d["object_poses"]:
+                ax.plot(x, d["object_poses"][name][:, 2], label=f"{name} z")
+    rz = a.get("resting_z", float("nan"))
+    if rz == rz:
+        ax.axhline(rz, color="gray", ls=":", lw=0.8)
+        ax.axhline(rz + a.get("lift_threshold", 0.03), color="green", ls=":", lw=0.8)
     _shade_windows(ax, d)
     ax.set_ylabel("object z (m)")
     ax.legend(loc="upper right", fontsize=7)
@@ -171,25 +226,43 @@ def plot_curves(d, out_path, ep):
     ax.set_xlabel("frame")
     ax.legend(loc="upper right", fontsize=7)
 
-    pg_s = int(a.get("pre_grasp_window_start", -1))
-    pg_e = int(a.get("pre_grasp_window_end", -1))
-    pp_s = int(a.get("pre_place_window_start", -1))
-    pp_e = int(a.get("pre_place_window_end", -1))
-    for axx in axes:
-        for pos, color, ls in [(pg_s, "green", "-"), (pg_e, "green", ":"), (pp_s, "orange", "-"), (pp_e, "orange", ":")]:
-            if pos >= 0:
-                axx.axvline(pos, color=color, lw=1.2, ls=ls)
+    if d["windows"]:
+        for axx in axes:
+            for w in d["windows"]:
+                color = "green" if int(w["type"]) == 1 else "orange"
+                axx.axvline(int(w["start"]), color=color, lw=1.1, ls="-")
+                axx.axvline(int(w["end"]), color=color, lw=1.0, ls=":")
+    else:
+        pg_s = int(a.get("pre_grasp_window_start", -1))
+        pg_e = int(a.get("pre_grasp_window_end", -1))
+        pp_s = int(a.get("pre_place_window_start", -1))
+        pp_e = int(a.get("pre_place_window_end", -1))
+        for axx in axes:
+            for pos, color, ls in [(pg_s, "green", "-"), (pg_e, "green", ":"), (pp_s, "orange", "-"), (pp_e, "orange", ":")]:
+                if pos >= 0:
+                    axx.axvline(pos, color=color, lw=1.2, ls=ls)
 
     flags = a.get("flags", "[]")
-    title = (f"episode{ep} arm={arm}  pre_grasp=[{pg_s},{pg_e}] green  "
-             f"pre_place=[{pp_s},{pp_e}] orange")
+    title = f"episode{ep} task={a.get('task', '?')} arm={arm}"
+    if d["windows"]:
+        title += "  " + " ".join(f"c{w['cycle']}:{w['name']}=[{w['start']},{w['end']}]" for w in d["windows"])
     if flags and flags != "[]":
         title += f"  FLAGS={flags}"
-    fig.suptitle(title, fontsize=10)
-    fig.tight_layout(rect=[0, 0, 1, 0.97])
+    fig.suptitle(title, fontsize=9)
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     fig.savefig(out_path, dpi=120)
     plt.close(fig)
+
+
+def _window_for_frame(d, t):
+    wid = -1 if d["window_id"] is None or t >= len(d["window_id"]) else int(d["window_id"][t])
+    if wid >= 0 and wid < len(d["windows"]):
+        return wid, d["windows"][wid]
+    for i, w in enumerate(d["windows"]):
+        if int(w["start"]) <= t <= int(w["end"]):
+            return i, w
+    return -1, None
 
 
 def annotate_video(d, out_path, ep):
@@ -198,37 +271,49 @@ def annotate_video(d, out_path, ep):
         return
     frames = parse_img_array(d["_rgb_raw"])  # (T,H,W,3) BGR
     nct, h_entry = d["next_checkpoint_type"], d["h_entry"]
-    oih, lif, rel = d["object_in_hand"], d["lifted"], d["placed_and_released"]
-    T = len(frames)
+    sem = d["semantic_phase"]
+    cyc = d["cycle_id"] if d["cycle_id"] is not None else np.full(len(nct), -1)
+    T = min(len(frames), len(nct))
 
     out = []
     for t in range(T):
         img = frames[t].copy()
         h, w = img.shape[:2]
-        typ = int(nct[t]) if t < len(nct) else 0
-        h_val = int(h_entry[t]) if t < len(h_entry) else -1
-        phases = []
-        if t < len(oih) and oih[t]:
-            phases.append("in-hand")
-        if t < len(lif) and lif[t]:
-            phases.append("lifted")
-        if t < len(rel) and rel[t]:
-            phases.append("released")
-        phase_text = "|".join(phases) if phases else "-"
-        banner = f"t={t} type={TYPE_NAMES.get(typ, typ)} h_entry={h_val} phase={phase_text}"
-        cv2.rectangle(img, (0, 0), (w, 26), (0, 0, 0), -1)
-        cv2.putText(img, banner, (4, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+        typ = int(nct[t])
+        h_val = int(h_entry[t])
+        wid, win = _window_for_frame(d, t)
+        cycle = int(cyc[t]) if t < len(cyc) else -1
+        win_name = win["name"] if win is not None else "none"
+        actor = win.get("actor", "") if win is not None else ""
+        stage = STAGE_DECODE.get(int(d["stage_code"][t]), None)
+        action = ACTION_DECODE.get(int(d["action_code"][t]), None)
+        arm = ARM_DECODE.get(int(d["arm_code"][t]), None)
+        sub = int(d["sub_index"][t])
+        phase_lines = [
+            f"object_in_hand={int(sem[t, 0])}  lifted={int(sem[t, 1])}",
+            f"placed_released={int(sem[t, 2])}",
+        ]
+
+        lines = [
+            f"frame={t}  window={win_name}#{wid}  actor={actor}",
+            f"type={TYPE_NAMES.get(typ, typ)}  h_entry={h_val}  h_bin={_h_entry_bin(h_val)}",
+            *phase_lines,
+        ]
+        cv2.rectangle(img, (0, 0), (w, 94), (0, 0, 0), -1)
+        for i, line in enumerate(lines):
+            font_scale = 0.50 if i < 2 else 0.48
+            color = (255, 255, 255) if i < 2 else (80, 255, 255)
+            cv2.putText(img, line, (4, 18 + i * 22), cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, 1,
+                        cv2.LINE_AA)
 
         if typ in TYPE_BGR and h_val == 0:
             color = TYPE_BGR[typ]
             cv2.rectangle(img, (1, 1), (w - 2, h - 2), color, 4)
-            cv2.putText(img, f"{TYPE_NAMES[typ].upper()} WINDOW", (w // 2 - 120, h - 12),
+            cv2.putText(img, f"{TYPE_NAMES[typ].upper()} WINDOW", (w // 2 - 145, h - 12),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2, cv2.LINE_AA)
         out.append(img)
 
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    # frames are BGR (cv2.imdecode); images_to_video expects RGB when is_rgb=True,
-    # so pass is_rgb=False to keep colors correct.
     images_to_video(np.stack(out, axis=0), out_path, fps=30.0, is_rgb=False)
 
 

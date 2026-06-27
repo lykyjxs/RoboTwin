@@ -23,6 +23,11 @@ try:
     )
     from curobo.util import logger
     import torch
+    import warp as wp
+    if not hasattr(wp, "torch"):
+        # warp-lang>=1.0 exposes torch helpers at the top level (e.g. wp.device_from_torch),
+        # while this curobo version expects the older wp.torch namespace.
+        wp.torch = wp
     import yaml
     from curobo.util import logger
     logger.setup_logger(level="error", logger_name="curobo")

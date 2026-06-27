@@ -48,6 +48,17 @@ TYPE_ENTRY_ATTRS = {
 }
 
 
+def _maybe_json(value: Any, default: Any) -> Any:
+    if isinstance(value, bytes):
+        value = value.decode("utf-8")
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return default
+    return value if value is not None else default
+
+
 def _decode_rgb(frame: np.ndarray | bytes) -> np.ndarray:
     """Decode one raw RoboTwin RGB frame into RGB uint8 HWC."""
     if isinstance(frame, np.ndarray) and frame.ndim == 3:
@@ -314,6 +325,43 @@ def _entry_from_attrs_or_labels(ks: h5py.Group, next_type: np.ndarray, h_entry: 
     return -1
 
 
+def _entries_by_window_or_type(ks: h5py.Group, next_type: np.ndarray, h_entry: np.ndarray, T: int) -> tuple[dict[int, int], dict[int, np.ndarray], str]:
+    """Resolve one descriptor entry per checkpoint window when possible.
+
+    Multi-cycle tasks such as stack_bowls_three have repeated checkpoint types
+    (G1/P1/G2/P2/G3/P3). A single descriptor per type would collapse all three
+    pre_grasp windows together, so prefer the labeler's dense window_id plus
+    checkpoint_windows_json contract. Older single-cycle data without window_id
+    falls back to the original type-based behavior.
+    """
+    windows = _maybe_json(ks.attrs.get("checkpoint_windows_json", "[]"), [])
+    if "window_id" in ks and windows:
+        window_id = ks["window_id"][()].astype(np.int32)
+        if window_id.shape[0] != T:
+            raise ValueError(f"/keystate/window_id length {window_id.shape[0]} does not match labels length {T}")
+        entries: dict[int, int] = {}
+        masks: dict[int, np.ndarray] = {}
+        for wid, window in enumerate(windows):
+            start = int(window.get("entry", window.get("start", -1)))
+            typ = int(window.get("type", -1))
+            if start < 0 or start >= T:
+                raise ValueError(f"invalid checkpoint window entry for window_id={wid}: {window}")
+            mask = (window_id == wid) & (next_type == typ) & (h_entry > 0)
+            entries[wid] = start
+            masks[wid] = mask
+        return entries, masks, "window"
+
+    entries = {}
+    masks = {}
+    for type_id in sorted(int(x) for x in np.unique(next_type) if int(x) > 0):
+        entry = _entry_from_attrs_or_labels(ks, next_type, h_entry, type_id)
+        if entry < 0 or entry >= T:
+            raise ValueError(f"cannot resolve valid entry frame for checkpoint type {type_id}")
+        entries[type_id] = entry
+        masks[type_id] = (next_type == type_id) & (h_entry > 0)
+    return entries, masks, "type"
+
+
 def build_descriptors_for_episode(
     hdf5_path: Path,
     *,
@@ -342,25 +390,20 @@ def build_descriptors_for_episode(
             raise ValueError(f"label length mismatch in {hdf5_path}: type={next_type.shape}, h_entry={h_entry.shape}")
         T = int(next_type.shape[0])
 
-        entry_by_type = {}
-        for type_id in sorted(int(x) for x in np.unique(next_type) if int(x) > 0):
-            entry = _entry_from_attrs_or_labels(ks, next_type, h_entry, type_id)
-            if entry < 0 or entry >= T:
-                raise ValueError(f"cannot resolve valid entry frame for checkpoint type {type_id} in {hdf5_path}")
-            entry_by_type[type_id] = entry
+        entries, masks, descriptor_key = _entries_by_window_or_type(ks, next_type, h_entry, T)
 
         if encoder == BOOTSTRAP_ENCODER:
-            descriptor_by_type = {
-                type_id: _entry_bootstrap_descriptor(root, entry, cameras, z_dim)
-                for type_id, entry in entry_by_type.items()
+            descriptor_by_key = {
+                key: _entry_bootstrap_descriptor(root, entry, cameras, z_dim)
+                for key, entry in entries.items()
             }
             source_dim = None
         elif encoder in (FROZEN_PI0_PREFIX_ENCODER, FROZEN_PI0_ACTION_EXPERT_ENCODER):
             if frozen_projector is None:
                 raise ValueError("frozen_projector is required for frozen Pi0 encoder")
             instruction = _read_instruction(base_dir, episode, instruction_key)
-            descriptor_by_entry = frozen_projector(root, list(entry_by_type.values()), cameras, instruction)
-            descriptor_by_type = {type_id: descriptor_by_entry[entry] for type_id, entry in entry_by_type.items()}
+            descriptor_by_entry = frozen_projector(root, list(entries.values()), cameras, instruction)
+            descriptor_by_key = {key: descriptor_by_entry[entry] for key, entry in entries.items()}
             source_dim = frozen_projector.source_dim
         else:
             raise ValueError(f"unknown encoder {encoder!r}")
@@ -370,16 +413,16 @@ def build_descriptors_for_episode(
         # Once h_entry reaches 0, the robot is already inside that window, so the z-entry target is
         # no longer a future-entry prediction target. Keep the descriptor zero there; the model loss
         # masks zero targets via target_nonzero.
-        z_valid_mask = (next_type > 0) & (h_entry > 0)
-        for type_id, descriptor in descriptor_by_type.items():
-            descriptors[(next_type == type_id) & z_valid_mask] = descriptor
+        for key, descriptor in descriptor_by_key.items():
+            descriptors[masks[key]] = descriptor
 
         summary = {
             "path": str(hdf5_path),
             "T": T,
             "z_dim": z_dim,
-            "entries": entry_by_type,
-            "valid_frames": int(z_valid_mask.sum()),
+            "entries": entries,
+            "descriptor_key": descriptor_key,
+            "valid_frames": int(sum(int(mask.sum()) for mask in masks.values())),
             "encoder": encoder,
             "source_dim": source_dim,
             "dry_run": dry_run,
@@ -396,7 +439,8 @@ def build_descriptors_for_episode(
         ks.attrs[f"{DESCRIPTOR_NAME}_normalized"] = True
         ks.attrs[f"{DESCRIPTOR_NAME}_version"] = 3 if encoder == FROZEN_PI0_ACTION_EXPERT_ENCODER else (2 if encoder == FROZEN_PI0_PREFIX_ENCODER else 1)
         ks.attrs[f"{DESCRIPTOR_NAME}_supervision"] = "pre_entry_only_h_entry_gt_0"
-        ks.attrs[f"{DESCRIPTOR_NAME}_entries"] = json.dumps(entry_by_type)
+        ks.attrs[f"{DESCRIPTOR_NAME}_entries"] = json.dumps({int(k): int(v) for k, v in entries.items()})
+        ks.attrs[f"{DESCRIPTOR_NAME}_entry_key"] = descriptor_key
         if source_dim is not None:
             ks.attrs[f"{DESCRIPTOR_NAME}_source_dim"] = int(source_dim)
             ks.attrs[f"{DESCRIPTOR_NAME}_projection"] = "fixed_random_projection_v1"

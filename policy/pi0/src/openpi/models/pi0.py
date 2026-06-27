@@ -428,6 +428,42 @@ class Pi0(_model.BaseModel):
         z_entry = self.ks_z_entry_descriptor_head(jnp.mean(action_hidden, axis=1))
         return type_id, h_entry_bin, phase, z_entry
 
+    def predict_keystate(self, rng: at.KeyArrayLike, observation: _model.Observation) -> dict[str, at.Array]:
+        """Predict KeyState heads from the current observation for deployment-time schedulers.
+
+        This is intentionally separate from `sample_actions` so rollout code can choose how many
+        sampled actions to execute without needing ground-truth KeyState labels. The adaptive
+        chunk scheduler only consumes `keystate_type_pred` and `keystate_h_entry_bin_pred`.
+        """
+        del rng  # The KeyState heads are deterministic at inference.
+        if not self._ks.use_checkpoint_head:
+            raise ValueError("predict_keystate requires use_checkpoint_head=True")
+        observation = _model.preprocess_observation(None, observation, train=False)
+
+        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
+        prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
+        positions = jnp.cumsum(prefix_mask, axis=1) - 1
+        (prefix_out, _), _ = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
+        prefix_pooled = self._pool_prefix(prefix_out, prefix_mask)
+
+        type_logits = self.ks_type_head(prefix_pooled)
+        h_logits = self.ks_horizon_head(prefix_pooled)
+        if self._ks.horizon_loss_type == "ce":
+            h_entry_bin = jnp.argmax(h_logits, axis=-1).astype(jnp.int32)
+        else:
+            h_entry_bin = jnp.sum(jax.nn.sigmoid(h_logits) > 0.5, axis=-1).astype(jnp.int32)
+        outputs = {
+            "keystate_type_logits": type_logits,
+            "keystate_type_pred": jnp.argmax(type_logits, axis=-1).astype(jnp.int32),
+            "keystate_h_entry_logits": h_logits,
+            "keystate_h_entry_bin_pred": h_entry_bin,
+        }
+        if self._ks.use_phase_head:
+            phase_logits = self.ks_phase_head(prefix_pooled)
+            outputs["keystate_phase_logits"] = phase_logits
+            outputs["keystate_phase_prob"] = jax.nn.sigmoid(phase_logits)
+        return outputs
+
     def _gt_keystate_features(self, obs: _model.Observation):
         if (
             obs.keystate_type is None

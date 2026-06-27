@@ -11,3 +11,12 @@ train_config_name: null
 model_name: null
 checkpoint_id: 30000
 pi0_step: 50
+
+# KeyState adaptive execution. When enabled, deployment uses predicted h_entry bin:
+#   h_entry_bin == 0 -> inside key window -> inside_pi0_step
+#   h_entry_bin != 0 -> outside key window -> outside_pi0_step
+adaptive_pi0_step: false
+outside_pi0_step: 50
+inside_pi0_step: 25
+test_num: 100
+instruction_seed: null

@@ -25,7 +25,15 @@ def encode_obs(observation):
 def get_model(usr_args):
     train_config_name, model_name, checkpoint_id, pi0_step = (usr_args["train_config_name"], usr_args["model_name"],
                                                               usr_args["checkpoint_id"], usr_args["pi0_step"])
-    return PI0(train_config_name, model_name, checkpoint_id, pi0_step)
+    return PI0(
+        train_config_name,
+        model_name,
+        checkpoint_id,
+        pi0_step,
+        adaptive_pi0_step=usr_args.get("adaptive_pi0_step", False),
+        outside_pi0_step=usr_args.get("outside_pi0_step", 50),
+        inside_pi0_step=usr_args.get("inside_pi0_step", 25),
+    )
 
 
 def eval(TASK_ENV, model, observation):
@@ -39,7 +47,17 @@ def eval(TASK_ENV, model, observation):
 
     # ======== Get Action ========
 
-    actions = model.get_action()[:model.pi0_step]
+    if model.adaptive_pi0_step:
+        result = model.get_action_result()
+        chunk_len = result["adaptive_pi0_step"]
+        h_entry_bin = result.get("keystate_h_entry_bin_pred", None)
+        type_pred = result.get("keystate_type_pred", None)
+        model.adaptive_decision_count += 1
+        if model.adaptive_decision_count <= 10 or h_entry_bin == 0:
+            print(f"[adaptive_chunk] h_bin={h_entry_bin} type={type_pred} chunk={chunk_len}")
+        actions = result["actions"][:chunk_len]
+    else:
+        actions = model.get_action()[:model.pi0_step]
 
     for action in actions:
         TASK_ENV.take_action(action)

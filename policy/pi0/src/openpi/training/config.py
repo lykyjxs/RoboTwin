@@ -435,6 +435,143 @@ _CONFIGS = [
         num_train_steps=30000,
         fsdp_devices=1,  # refer line 359
     ),
+    # Stack Bowls baseline config for later fixed-chunk Pi0 comparison. First milestone only uses
+    # this for assets/norm-stat plumbing; formal rollout comparison happens after Stage3 pred/mixed fusion.
+    TrainConfig(
+        name="pi0_base_aloha_robotwin_stack_bowls_three_lora",
+        model=pi0.Pi0Config(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"),
+        data=LeRobotAlohaDataConfig(
+            repo_id="stack_bowls_three_demo_clean_300_keystate_stage1",
+            adapt_to_pi=False,
+            repack_transforms=_transforms.Group(inputs=[
+                _transforms.RepackTransform({
+                    "images": {
+                        "cam_high": "observation.images.cam_high",
+                        "cam_left_wrist": "observation.images.cam_left_wrist",
+                        "cam_right_wrist": "observation.images.cam_right_wrist",
+                    },
+                    "state": "observation.state",
+                    "actions": "action",
+                    "prompt": "prompt",
+                })
+            ]),
+            base_config=DataConfig(
+                local_files_only=True,
+                prompt_from_task=True,
+            ),
+        ),
+        freeze_filter=pi0.Pi0Config(paligemma_variant="gemma_2b_lora",
+                                    action_expert_variant="gemma_300m_lora").get_freeze_filter(),
+        batch_size=32,
+        weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=30000,
+        fsdp_devices=1,
+    ),
+    # Stack Bowls Stage1 smoke config: validates multi-cycle KeyState labels and the training data path only.
+    # Do not use Stage1-only rollout as the formal KeyState adaptive-chunking comparison.
+    TrainConfig(
+        name="pi0_base_aloha_robotwin_stack_bowls_three_keystate_lora",
+        model=pi0.Pi0Config(
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            use_checkpoint_head=True,
+            use_phase_head=True,
+            lambda_type=0.1,
+            lambda_h=0.1,
+            lambda_ph=0.1,
+            horizon_bin0_weight=1.0,
+            horizon_bin1_weight=1.10,
+        ),
+        data=KeyStateAlohaDataConfig(
+            repo_id="stack_bowls_three_demo_clean_300_keystate_stage1",
+            adapt_to_pi=False,
+            repack_transforms=_transforms.Group(inputs=[
+                _transforms.RepackTransform({
+                    "images": {
+                        "cam_high": "observation.images.cam_high",
+                        "cam_left_wrist": "observation.images.cam_left_wrist",
+                        "cam_right_wrist": "observation.images.cam_right_wrist",
+                    },
+                    "state": "observation.state",
+                    "actions": "action",
+                    "prompt": "prompt",
+                    "keystate": {
+                        "next_checkpoint_type": "observation.keystate.next_checkpoint_type",
+                        "h_entry": "observation.keystate.h_entry",
+                        "semantic_phase": "observation.keystate.semantic_phase",
+                    },
+                })
+            ]),
+            base_config=DataConfig(
+                local_files_only=True,
+                prompt_from_task=True,
+            ),
+        ),
+        freeze_filter=pi0.Pi0Config(paligemma_variant="gemma_2b_lora",
+                                    action_expert_variant="gemma_300m_lora").get_freeze_filter(),
+        batch_size=32,
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "s3://openpi-assets/checkpoints/pi0_base/params",
+            missing_regex=".*(lora|ks_).*",
+        ),
+        num_train_steps=30000,
+        fsdp_devices=1,
+    ),
+    # Stack Bowls Stage2 config: train on train300 with per-window z_entry_descriptor targets,
+    # initialized from the selected Stage1 checkpoint (best on held-out val30: step 15000).
+    # The fresh val30 set remains held out and should only be used for validation/checkpoint selection.
+    TrainConfig(
+        name="pi0_base_aloha_robotwin_stack_bowls_three_keystate_stage2_lora",
+        model=pi0.Pi0Config(
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            use_checkpoint_head=True,
+            use_phase_head=True,
+            use_z_entry_descriptor=True,
+            z_entry_descriptor_dim=64,
+            lambda_type=0.1,
+            lambda_h=0.1,
+            lambda_ph=0.1,
+            lambda_z_entry_descriptor=0.1,
+            horizon_bin0_weight=1.0,
+            horizon_bin1_weight=1.10,
+        ),
+        data=KeyStateAlohaDataConfig(
+            repo_id="stack_bowls_three_demo_clean_300_keystate_stage2_actionexpert",
+            adapt_to_pi=False,
+            repack_transforms=_transforms.Group(inputs=[
+                _transforms.RepackTransform({
+                    "images": {
+                        "cam_high": "observation.images.cam_high",
+                        "cam_left_wrist": "observation.images.cam_left_wrist",
+                        "cam_right_wrist": "observation.images.cam_right_wrist",
+                    },
+                    "state": "observation.state",
+                    "actions": "action",
+                    "prompt": "prompt",
+                    "keystate": {
+                        "next_checkpoint_type": "observation.keystate.next_checkpoint_type",
+                        "h_entry": "observation.keystate.h_entry",
+                        "semantic_phase": "observation.keystate.semantic_phase",
+                        "z_entry_descriptor": "observation.keystate.z_entry_descriptor",
+                    },
+                })
+            ]),
+            base_config=DataConfig(
+                local_files_only=True,
+                prompt_from_task=True,
+            ),
+        ),
+        freeze_filter=pi0.Pi0Config(paligemma_variant="gemma_2b_lora",
+                                    action_expert_variant="gemma_300m_lora").get_freeze_filter(),
+        batch_size=32,
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "./checkpoints/openpi/openpi-assets/checkpoints/keystate/pi0_base_aloha_robotwin_stack_bowls_three_keystate_lora/stack_bowls_three_300_stage1_lora/15000/params",
+            missing_regex=".*ks_z_entry_descriptor_head.*",
+        ),
+        num_train_steps=30000,
+        fsdp_devices=1,
+    ),
     # pi0_base by lora + KeyState heads (Stage 1 warm-up): copy of pi0_base_aloha_robotwin_lora with
     # the checkpoint/phase heads turned on, aux lambdas kept small (0.1) so they don't drown the flow
     # loss, and the weight loader widened to tolerate the freshly-initialized ks_* heads.
@@ -539,6 +676,64 @@ _CONFIGS = [
             missing_regex=".*(lora|ks_).*",
         ),
         num_train_steps=30000,
+        fsdp_devices=1,
+    ),
+    # Stack Bowls Stage3 pred-fusion config: initialize from Stage2 best checkpoint (test30 best: step 5000)
+    # and train late KeyState cross-attention using predicted KeyState features, not GT/oracle features.
+    TrainConfig(
+        name="pi0_base_aloha_robotwin_stack_bowls_three_keystate_stage3_pred_late_xattn_lora",
+        model=pi0.Pi0Config(
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            use_checkpoint_head=True,
+            use_phase_head=True,
+            use_z_entry_descriptor=True,
+            use_keystate_fusion=True,
+            keystate_fusion_mode="late_xattn",
+            ks_fusion_source="pred",
+            z_entry_descriptor_dim=64,
+            lambda_type=0.1,
+            lambda_h=0.1,
+            lambda_ph=0.1,
+            lambda_z_entry_descriptor=0.1,
+            horizon_bin0_weight=1.0,
+            horizon_bin1_weight=1.10,
+            ks_xattn_alpha_init=1e-3,
+        ),
+        data=KeyStateAlohaDataConfig(
+            repo_id="stack_bowls_three_demo_clean_300_keystate_stage2_actionexpert",
+            adapt_to_pi=False,
+            repack_transforms=_transforms.Group(inputs=[
+                _transforms.RepackTransform({
+                    "images": {
+                        "cam_high": "observation.images.cam_high",
+                        "cam_left_wrist": "observation.images.cam_left_wrist",
+                        "cam_right_wrist": "observation.images.cam_right_wrist",
+                    },
+                    "state": "observation.state",
+                    "actions": "action",
+                    "prompt": "prompt",
+                    "keystate": {
+                        "next_checkpoint_type": "observation.keystate.next_checkpoint_type",
+                        "h_entry": "observation.keystate.h_entry",
+                        "semantic_phase": "observation.keystate.semantic_phase",
+                        "z_entry_descriptor": "observation.keystate.z_entry_descriptor",
+                    },
+                })
+            ]),
+            base_config=DataConfig(
+                local_files_only=True,
+                prompt_from_task=True,
+            ),
+        ),
+        freeze_filter=pi0.Pi0Config(paligemma_variant="gemma_2b_lora",
+                                    action_expert_variant="gemma_300m_lora").get_freeze_filter(),
+        batch_size=32,
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "./checkpoints/openpi/openpi-assets/checkpoints/keystate_stage2/pi0_base_aloha_robotwin_stack_bowls_three_keystate_stage2_lora/stack_bowls_three_300_stage2_actionexpert_from_stage1_15000_lora/5000/params",
+            missing_regex=".*(ks_type_embed|ks_horizon_embed|ks_phase_proj|ks_z_entry_proj|ks_action_ln|ks_memory_ln|ks_late_xattn|ks_late_xattn_alpha).*",
+        ),
+        num_train_steps=15000,
         fsdp_devices=1,
     ),
     # pi0_base by lora + Stage 3 late KeyState cross-attention: starts from the Stage2

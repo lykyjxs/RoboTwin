@@ -32,6 +32,13 @@ class Policy(BasePolicy):
         metadata: dict[str, Any] | None = None,
     ):
         self._sample_actions = nnx_utils.module_jit(model.sample_actions)
+        self._predict_keystate = None
+        if (
+            hasattr(model, "predict_keystate")
+            and hasattr(model, "_ks")
+            and getattr(model._ks, "use_checkpoint_head", False)
+        ):
+            self._predict_keystate = nnx_utils.module_jit(model.predict_keystate)
         self._input_transform = _transforms.compose(transforms)
         self._output_transform = _transforms.compose(output_transforms)
         self._rng = rng or jax.random.key(0)
@@ -47,14 +54,22 @@ class Policy(BasePolicy):
         inputs = jax.tree.map(lambda x: jnp.asarray(x)[np.newaxis, ...], inputs)
 
         self._rng, sample_rng = jax.random.split(self._rng)
+        observation = _model.Observation.from_dict(inputs)
         outputs = {
             "state": inputs["state"],
-            "actions": self._sample_actions(sample_rng, _model.Observation.from_dict(inputs), **self._sample_kwargs),
+            "actions": self._sample_actions(sample_rng, observation, **self._sample_kwargs),
         }
+        aux_outputs = None
+        if self._predict_keystate is not None:
+            aux_outputs = self._predict_keystate(sample_rng, observation)
 
         # Unbatch and convert to np.ndarray.
         outputs = jax.tree.map(lambda x: np.asarray(x[0, ...]), outputs)
-        return self._output_transform(outputs)
+        outputs = self._output_transform(outputs)
+        if aux_outputs is not None:
+            aux_outputs = jax.tree.map(lambda x: np.asarray(x[0, ...]), aux_outputs)
+            outputs.update(aux_outputs)
+        return outputs
 
     @property
     def metadata(self) -> dict[str, Any]:

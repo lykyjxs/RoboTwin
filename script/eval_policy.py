@@ -12,6 +12,7 @@ import numpy as np
 from pathlib import Path
 from collections import deque
 import traceback
+import csv
 
 import yaml
 from datetime import datetime
@@ -157,12 +158,13 @@ def main(usr_args):
 
     seed = usr_args["seed"]
 
-    st_seed = 100000 * (1 + seed)
+    st_seed = int(usr_args.get("start_seed", 100000 * (1 + seed)))
     suc_nums = []
-    test_num = 100
+    test_num = int(usr_args.get("test_num", 100))
     topk = 1
 
     model = get_model(usr_args)
+    episode_log_path = save_dir / "episode_log.csv"
     st_seed, suc_num = eval_policy(task_name,
                                    TASK_ENV,
                                    args,
@@ -170,7 +172,8 @@ def main(usr_args):
                                    st_seed,
                                    test_num=test_num,
                                    video_size=video_size,
-                                   instruction_type=instruction_type)
+                                   instruction_type=instruction_type,
+                                   episode_log_path=episode_log_path)
     suc_nums.append(suc_num)
 
     topk_success_rate = sorted(suc_nums, reverse=True)[:topk]
@@ -193,7 +196,8 @@ def eval_policy(task_name,
                 st_seed,
                 test_num=100,
                 video_size=None,
-                instruction_type=None):
+                instruction_type=None,
+                episode_log_path=None):
     print(f"\033[34mTask Name: {args['task_name']}\033[0m")
     print(f"\033[34mPolicy Name: {args['policy_name']}\033[0m")
 
@@ -209,117 +213,163 @@ def eval_policy(task_name,
     eval_func = eval_function_decorator(policy_name, "eval")
     reset_func = eval_function_decorator(policy_name, "reset_model")
 
+    episode_log_file = None
+    episode_log_writer = None
+    if episode_log_path is not None:
+        episode_log_file = open(episode_log_path, "w", newline="", encoding="utf-8")
+        episode_log_writer = csv.DictWriter(
+            episode_log_file,
+            fieldnames=[
+                "episode_id",
+                "actual_seed",
+                "instruction",
+                "success",
+                "steps",
+                "video_path",
+                "ckpt_setting",
+            ],
+        )
+        episode_log_writer.writeheader()
+
     now_seed = st_seed
     task_total_reward = 0
     clear_cache_freq = args["clear_cache_freq"]
 
     args["eval_mode"] = True
 
-    while succ_seed < test_num:
-        render_freq = args["render_freq"]
-        args["render_freq"] = 0
+    try:
+        while succ_seed < test_num:
+            render_freq = args["render_freq"]
+            args["render_freq"] = 0
 
-        if expert_check:
-            try:
-                TASK_ENV.setup_demo(now_ep_num=now_id, seed=now_seed, is_test=True, **args)
-                episode_info = TASK_ENV.play_once()
-                TASK_ENV.close_env()
-            except UnStableError as e:
-                # print(" -------------")
-                # print("Error: ", e)
-                # print(" -------------")
-                TASK_ENV.close_env()
+            if expert_check:
+                try:
+                    TASK_ENV.setup_demo(now_ep_num=now_id, seed=now_seed, is_test=True, **args)
+                    episode_info = TASK_ENV.play_once()
+                    TASK_ENV.close_env()
+                except UnStableError as e:
+                    # print(" -------------")
+                    # print("Error: ", e)
+                    # print(" -------------")
+                    TASK_ENV.close_env()
+                    now_seed += 1
+                    args["render_freq"] = render_freq
+                    continue
+                except Exception as e:
+                    # stack_trace = traceback.format_exc()
+                    # print(" -------------")
+                    # print("Error: ", e)
+                    # print(" -------------")
+                    TASK_ENV.close_env()
+                    now_seed += 1
+                    args["render_freq"] = render_freq
+                    print("error occurs !")
+                    continue
+
+            if (not expert_check) or (TASK_ENV.plan_success and TASK_ENV.check_success()):
+                succ_seed += 1
+                suc_test_seed_list.append(now_seed)
+            else:
                 now_seed += 1
                 args["render_freq"] = render_freq
                 continue
-            except Exception as e:
-                # stack_trace = traceback.format_exc()
-                # print(" -------------")
-                # print("Error: ", e)
-                # print(" -------------")
-                TASK_ENV.close_env()
-                now_seed += 1
-                args["render_freq"] = render_freq
-                print("error occurs !")
-                continue
 
-        if (not expert_check) or (TASK_ENV.plan_success and TASK_ENV.check_success()):
-            succ_seed += 1
-            suc_test_seed_list.append(now_seed)
-        else:
-            now_seed += 1
             args["render_freq"] = render_freq
-            continue
 
-        args["render_freq"] = render_freq
+            TASK_ENV.setup_demo(now_ep_num=now_id, seed=now_seed, is_test=True, **args)
+            episode_info_list = [episode_info["info"]]
+            results = generate_episode_descriptions(args["task_name"], episode_info_list, test_num)
+            if usr_args.get("instruction_text") is not None:
+                instruction = str(usr_args["instruction_text"])
+            else:
+                if usr_args.get("instruction_seed") is not None:
+                    np.random.seed(int(usr_args["instruction_seed"]) + int(now_seed))
+                instruction = np.random.choice(results[0][instruction_type])
+            TASK_ENV.set_instruction(instruction=instruction)  # set language instruction
 
-        TASK_ENV.setup_demo(now_ep_num=now_id, seed=now_seed, is_test=True, **args)
-        episode_info_list = [episode_info["info"]]
-        results = generate_episode_descriptions(args["task_name"], episode_info_list, test_num)
-        instruction = np.random.choice(results[0][instruction_type])
-        TASK_ENV.set_instruction(instruction=instruction)  # set language instruction
+            if TASK_ENV.eval_video_path is not None:
+                ffmpeg = subprocess.Popen(
+                    [
+                        "ffmpeg",
+                        "-y",
+                        "-loglevel",
+                        "error",
+                        "-f",
+                        "rawvideo",
+                        "-pixel_format",
+                        "rgb24",
+                        "-video_size",
+                        video_size,
+                        "-framerate",
+                        "10",
+                        "-i",
+                        "-",
+                        "-pix_fmt",
+                        "yuv420p",
+                        "-vcodec",
+                        "libx264",
+                        "-crf",
+                        "23",
+                        f"{TASK_ENV.eval_video_path}/episode{TASK_ENV.test_num}.mp4",
+                    ],
+                    stdin=subprocess.PIPE,
+                )
+                TASK_ENV._set_eval_video_ffmpeg(ffmpeg)
 
-        if TASK_ENV.eval_video_path is not None:
-            ffmpeg = subprocess.Popen(
-                [
-                    "ffmpeg",
-                    "-y",
-                    "-loglevel",
-                    "error",
-                    "-f",
-                    "rawvideo",
-                    "-pixel_format",
-                    "rgb24",
-                    "-video_size",
-                    video_size,
-                    "-framerate",
-                    "10",
-                    "-i",
-                    "-",
-                    "-pix_fmt",
-                    "yuv420p",
-                    "-vcodec",
-                    "libx264",
-                    "-crf",
-                    "23",
-                    f"{TASK_ENV.eval_video_path}/episode{TASK_ENV.test_num}.mp4",
-                ],
-                stdin=subprocess.PIPE,
+            succ = False
+            reset_func(model)
+            while TASK_ENV.take_action_cnt < TASK_ENV.step_lim:
+                observation = TASK_ENV.get_obs()
+                eval_func(TASK_ENV, model, observation)
+                if TASK_ENV.eval_success:
+                    succ = True
+                    break
+            # task_total_reward += TASK_ENV.episode_score
+            if TASK_ENV.eval_video_path is not None:
+                TASK_ENV._del_eval_video_ffmpeg()
+
+            video_path = ""
+            if TASK_ENV.eval_video_path is not None:
+                video_path = str(Path(TASK_ENV.eval_video_path) / f"episode{TASK_ENV.test_num}.mp4")
+
+            if succ:
+                TASK_ENV.suc += 1
+                print("\033[92mSuccess!\033[0m")
+            else:
+                print("\033[91mFail!\033[0m")
+
+            if episode_log_writer is not None:
+                episode_log_writer.writerow(
+                    {
+                        "episode_id": now_id,
+                        "actual_seed": now_seed,
+                        "instruction": instruction,
+                        "success": int(succ),
+                        "steps": TASK_ENV.take_action_cnt,
+                        "video_path": video_path,
+                        "ckpt_setting": args["ckpt_setting"],
+                    }
+                )
+                episode_log_file.flush()
+
+            now_id += 1
+            TASK_ENV.close_env(clear_cache=((succ_seed + 1) % clear_cache_freq == 0))
+
+            if TASK_ENV.render_freq:
+                TASK_ENV.viewer.close()
+
+            TASK_ENV.test_num += 1
+
+            print(
+                f"\033[93m{task_name}\033[0m | \033[94m{args['policy_name']}\033[0m | \033[92m{args['task_config']}\033[0m | \033[91m{args['ckpt_setting']}\033[0m\n"
+                f"Success rate: \033[96m{TASK_ENV.suc}/{TASK_ENV.test_num}\033[0m => \033[95m{round(TASK_ENV.suc/TASK_ENV.test_num*100, 1)}%\033[0m, current seed: \033[90m{now_seed}\033[0m\n"
             )
-            TASK_ENV._set_eval_video_ffmpeg(ffmpeg)
+            # TASK_ENV._take_picture()
+            now_seed += 1
 
-        succ = False
-        reset_func(model)
-        while TASK_ENV.take_action_cnt < TASK_ENV.step_lim:
-            observation = TASK_ENV.get_obs()
-            eval_func(TASK_ENV, model, observation)
-            if TASK_ENV.eval_success:
-                succ = True
-                break
-        # task_total_reward += TASK_ENV.episode_score
-        if TASK_ENV.eval_video_path is not None:
-            TASK_ENV._del_eval_video_ffmpeg()
-
-        if succ:
-            TASK_ENV.suc += 1
-            print("\033[92mSuccess!\033[0m")
-        else:
-            print("\033[91mFail!\033[0m")
-
-        now_id += 1
-        TASK_ENV.close_env(clear_cache=((succ_seed + 1) % clear_cache_freq == 0))
-
-        if TASK_ENV.render_freq:
-            TASK_ENV.viewer.close()
-
-        TASK_ENV.test_num += 1
-
-        print(
-            f"\033[93m{task_name}\033[0m | \033[94m{args['policy_name']}\033[0m | \033[92m{args['task_config']}\033[0m | \033[91m{args['ckpt_setting']}\033[0m\n"
-            f"Success rate: \033[96m{TASK_ENV.suc}/{TASK_ENV.test_num}\033[0m => \033[95m{round(TASK_ENV.suc/TASK_ENV.test_num*100, 1)}%\033[0m, current seed: \033[90m{now_seed}\033[0m\n"
-        )
-        # TASK_ENV._take_picture()
-        now_seed += 1
+    finally:
+        if episode_log_file is not None:
+            episode_log_file.close()
 
     return now_seed, TASK_ENV.suc
 

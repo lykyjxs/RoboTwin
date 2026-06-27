@@ -104,7 +104,7 @@ def main(task_name=None, task_config=None):
 
 
 def run(TASK_ENV, args):
-    epid, suc_num, fail_num, seed_list = 0, 0, 0, []
+    epid, suc_num, fail_num, seed_list = int(args.get("seed_start", 0)), 0, 0, []
 
     print(f"Task Name: \033[34m{args['task_name']}\033[0m")
 

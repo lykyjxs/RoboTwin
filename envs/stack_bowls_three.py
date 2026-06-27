@@ -45,6 +45,7 @@ class stack_bowls_three(Base_Task):
         self.bowl1 = create_bowl(bowl_pose_lst[0])
         self.bowl2 = create_bowl(bowl_pose_lst[1])
         self.bowl3 = create_bowl(bowl_pose_lst[2])
+        self.record_actors = [("bowl1", self.bowl1), ("bowl2", self.bowl2), ("bowl3", self.bowl3)]
 
         self.add_prohibit_area(self.bowl1, padding=0.07)
         self.add_prohibit_area(self.bowl2, padding=0.07)
@@ -65,7 +66,9 @@ class stack_bowls_three(Base_Task):
                     arm_tag=arm_tag,
                     contact_point_id=[0, 2][int(arm_tag == "left")],
                     pre_grasp_dis=0.1,
-                ))
+                ),
+                stage_tag="grasp",
+            )
         else:
             self.move(
                 self.grasp_actor(
@@ -75,8 +78,9 @@ class stack_bowls_three(Base_Task):
                     pre_grasp_dis=0.1,
                 ),  # arm_tag
                 self.back_to_origin(arm_tag=arm_tag.opposite),  # arm_tag.opposite
+                stage_tag="grasp",
             )
-        self.move(self.move_by_displacement(arm_tag, z=0.1))
+        self.move(self.move_by_displacement(arm_tag, z=0.1), stage_tag="lift")
         self.move(
             self.place_actor(
                 actor,
@@ -86,7 +90,9 @@ class stack_bowls_three(Base_Task):
                 pre_dis=0.09,
                 dis=0,
                 constrain="align",
-            ))
+            ),
+            stage_tag="place",
+        )
         self.move(self.move_by_displacement(arm_tag, z=0.09))
         self.las_arm = arm_tag
         return arm_tag
