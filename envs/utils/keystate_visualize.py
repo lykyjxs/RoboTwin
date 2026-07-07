@@ -44,6 +44,8 @@ TYPE_BGR = {1: (0, 255, 0), 2: (0, 165, 255)}
 STAGE_DECODE = {0: None, 1: "grasp", 2: "lift", 3: "place"}
 ACTION_DECODE = {0: None, 1: "move", 2: "gripper_close", 3: "gripper_open"}
 ARM_DECODE = {0: None, 1: "left", 2: "right"}
+DEFAULT_SEMANTIC_PHASE_NAMES = ["object_in_hand", "lifted", "placed_and_released"]
+DEFAULT_CHECKPOINT_TYPE_NAMES = ["none", "pre_grasp", "pre_place"]
 
 
 def _maybe_json(v, default=None):
@@ -78,6 +80,22 @@ def _h_entry_bin(h):
     return "bin6"
 
 
+def _names_from_attr(attrs, key, default, expected_len):
+    names = _maybe_json(attrs.get(key), default)
+    if not isinstance(names, (list, tuple)) or len(names) != expected_len:
+        return list(default)
+    return [str(x) for x in names]
+
+
+def _phase_label(name):
+    return str(name).replace("_", " ")
+
+
+def _type_name(d, typ):
+    names = d.get("type_names", DEFAULT_CHECKPOINT_TYPE_NAMES)
+    return names[typ] if 0 <= typ < len(names) else TYPE_NAMES.get(typ, typ)
+
+
 def _load(hdf5_path):
     with h5py.File(hdf5_path, "r") as f:
         if "keystate" not in f:
@@ -89,12 +107,19 @@ def _load(hdf5_path):
             raise KeyError(f"{hdf5_path} /keystate missing v3 fields: {missing}")
         attrs = dict(ks.attrs)
         sem = ks["semantic_phase"][()]
+        phase_names = _names_from_attr(attrs, "semantic_phase_names", DEFAULT_SEMANTIC_PHASE_NAMES, sem.shape[1])
+        type_names = _names_from_attr(attrs, "checkpoint_type_names", DEFAULT_CHECKPOINT_TYPE_NAMES, 3)
+        phase3_name = phase_names[2]
+        phase3 = ks[phase3_name][()] if phase3_name in ks else (
+            ks["placed_and_released"][()] if "placed_and_released" in ks else sem[:, 2])
         d = {
             "next_checkpoint_type": ks["next_checkpoint_type"][()],
             "h_entry": ks["h_entry"][()],
             "object_in_hand": ks["object_in_hand"][()] if "object_in_hand" in ks else sem[:, 0],
             "lifted": ks["lifted"][()] if "lifted" in ks else sem[:, 1],
-            "placed_and_released": ks["placed_and_released"][()] if "placed_and_released" in ks else sem[:, 2],
+            "phase3": phase3,
+            "phase_names": phase_names,
+            "type_names": type_names,
             "semantic_phase": sem,
             "cycle_id": ks["cycle_id"][()] if "cycle_id" in ks else None,
             "window_id": ks["window_id"][()] if "window_id" in ks else None,
@@ -157,8 +182,8 @@ def _window_mask(d, typ):
 
 
 def _shade_windows(ax, d):
-    _span(ax, _window_mask(d, 1), TYPE_COLORS[1], "pre_grasp window", alpha=0.20)
-    _span(ax, _window_mask(d, 2), TYPE_COLORS[2], "pre_place window", alpha=0.20)
+    _span(ax, _window_mask(d, 1), TYPE_COLORS[1], f"{_type_name(d, 1)} window", alpha=0.20)
+    _span(ax, _window_mask(d, 2), TYPE_COLORS[2], f"{_type_name(d, 2)} window", alpha=0.20)
 
 
 def _active_arm(d):
@@ -185,7 +210,7 @@ def plot_curves(d, out_path, ep):
     _shade_windows(ax, d)
     _span(ax, d["object_in_hand"], "tab:blue", "in-hand", alpha=0.10)
     _span(ax, d["lifted"], "tab:green", "lifted", alpha=0.08)
-    _span(ax, d["placed_and_released"], "tab:red", "released", alpha=0.10)
+    _span(ax, d["phase3"], "tab:red", _phase_label(d["phase_names"][2]), alpha=0.10)
     ax.legend(loc="upper right", fontsize=7)
 
     ax = axes[1]
@@ -290,13 +315,13 @@ def annotate_video(d, out_path, ep):
         arm = ARM_DECODE.get(int(d["arm_code"][t]), None)
         sub = int(d["sub_index"][t])
         phase_lines = [
-            f"object_in_hand={int(sem[t, 0])}  lifted={int(sem[t, 1])}",
-            f"placed_released={int(sem[t, 2])}",
+            f"{d['phase_names'][0]}={int(sem[t, 0])}  {d['phase_names'][1]}={int(sem[t, 1])}",
+            f"{d['phase_names'][2]}={int(sem[t, 2])}",
         ]
 
         lines = [
             f"frame={t}  window={win_name}#{wid}  actor={actor}",
-            f"type={TYPE_NAMES.get(typ, typ)}  h_entry={h_val}  h_bin={_h_entry_bin(h_val)}",
+            f"type={_type_name(d, typ)}  h_entry={h_val}  h_bin={_h_entry_bin(h_val)}",
             *phase_lines,
         ]
         cv2.rectangle(img, (0, 0), (w, 94), (0, 0, 0), -1)
@@ -309,7 +334,7 @@ def annotate_video(d, out_path, ep):
         if typ in TYPE_BGR and h_val == 0:
             color = TYPE_BGR[typ]
             cv2.rectangle(img, (1, 1), (w - 2, h - 2), color, 4)
-            cv2.putText(img, f"{TYPE_NAMES[typ].upper()} WINDOW", (w // 2 - 145, h - 12),
+            cv2.putText(img, f"{_type_name(d, typ).upper()} WINDOW", (w // 2 - 145, h - 12),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2, cv2.LINE_AA)
         out.append(img)
 

@@ -44,6 +44,13 @@ def load_hdf5(dataset_path):
                         f"/keystate/z_entry_descriptor length {z_entry_descriptor.shape[0]} does not match "
                         f"next_checkpoint_type length {keystate['next_checkpoint_type'].shape[0]} in {dataset_path}")
                 keystate["z_entry_descriptor"] = z_entry_descriptor
+            if "keypose_entry_abs" in ks:
+                keypose_entry_abs = ks["keypose_entry_abs"][()].astype(np.float32)
+                if keypose_entry_abs.shape[0] != keystate["next_checkpoint_type"].shape[0]:
+                    raise ValueError(
+                        f"/keystate/keypose_entry_abs length {keypose_entry_abs.shape[0]} does not match "
+                        f"next_checkpoint_type length {keystate['next_checkpoint_type'].shape[0]} in {dataset_path}")
+                keystate["keypose_entry_abs"] = keypose_entry_abs
 
     return left_gripper, left_arm, right_gripper, right_arm, image_dict, keystate
 
@@ -105,7 +112,7 @@ def data_transform(path, episode_num, save_path):
         right_arm_dim = []
         # KeyState labels collected on the SAME frames as qpos/images (j != last) so they stay aligned.
         # Stays empty when the source hdf5 has no /keystate (keystate is None) -> nothing written below.
-        ks_next_type, ks_h_entry, ks_phase, ks_z_entry_descriptor = [], [], [], []
+        ks_next_type, ks_h_entry, ks_phase, ks_z_entry_descriptor, ks_keypose_entry_abs = [], [], [], [], []
 
         last_state = None
         for j in range(0, left_gripper_all.shape[0]):
@@ -146,6 +153,8 @@ def data_transform(path, episode_num, save_path):
                     ks_phase.append(keystate["semantic_phase"][j])
                     if "z_entry_descriptor" in keystate:
                         ks_z_entry_descriptor.append(keystate["z_entry_descriptor"][j])
+                    if "keypose_entry_abs" in keystate:
+                        ks_keypose_entry_abs.append(keystate["keypose_entry_abs"][j])
 
             if j != 0:
                 action = state
@@ -185,6 +194,11 @@ def data_transform(path, episode_num, save_path):
                     ks_grp.create_dataset(
                         "z_entry_descriptor",
                         data=np.array(ks_z_entry_descriptor, dtype=np.float32),
+                    )
+                if "keypose_entry_abs" in keystate:
+                    ks_grp.create_dataset(
+                        "keypose_entry_abs",
+                        data=np.array(ks_keypose_entry_abs, dtype=np.float32),
                     )
 
         begin += 1

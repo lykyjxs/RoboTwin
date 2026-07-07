@@ -9,6 +9,8 @@ model expects on `model.Observation`: `keystate_type` / `keystate_h_entry` / `ke
 Stage 2 may additionally carry `keystate.z_entry_descriptor`, a checkpoint-entry
 Key-state latent target. The current main backend extracts it from frozen Pi0 action-expert
 hidden and projects it to 64D; older bootstrap/prefix backends use the same field name.
+Stage 2 may also carry `keystate.keypose_entry_abs`, the upcoming checkpoint-entry actor
+world pose [x,y,z,qw,qx,qy,qz].
 
 Two responsibilities live here (and nowhere else, so the contract is in one place):
 
@@ -20,8 +22,8 @@ Two responsibilities live here (and nowhere else, so the contract is in one plac
 2. Pass `next_checkpoint_type` through as `keystate_type` and `semantic_phase` as
    `keystate_phase` (float, for BCE), squeezing the trailing singleton dim that the
    `(1,)`-shaped LeRobot scalar features carry.
-3. Pass optional `z_entry_descriptor` through as `keystate_z_entry_descriptor` without
-   bucketing or normalization; the generator controls descriptor scale.
+3. Pass optional `z_entry_descriptor` / `keypose_entry_abs` through without bucketing or
+   normalization; their generators control target scale and masking.
 
 This transform is a no-op when `keystate` is absent (baseline configs / inference),
 so existing pipelines are unaffected.
@@ -79,6 +81,8 @@ class KeyStateInputs(transforms.DataTransformFn):
         data["keystate_phase"] = np.asarray(ks["semantic_phase"]).astype(np.float32)
         if "z_entry_descriptor" in ks:
             data["keystate_z_entry_descriptor"] = np.asarray(ks["z_entry_descriptor"]).astype(np.float32)
+        if "keypose_entry_abs" in ks:
+            data["keystate_keypose_entry_abs"] = np.asarray(ks["keypose_entry_abs"]).astype(np.float32)
 
         # consumed: drop the raw sub-dict so it does not leak into the model input dict.
         data.pop("keystate", None)

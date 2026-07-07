@@ -110,6 +110,8 @@ class Observation(Generic[ArrayT]):
     # Stage 2 bootstrap descriptor target. This is a deterministic z-entry descriptor used to
     # validate the auxiliary prediction path; it is not a frozen-Pi0 latent target.
     keystate_z_entry_descriptor: at.Float[ArrayT, "*b z"] | None = None
+    # Stage 2 checkpoint-entry absolute actor pose target [x,y,z,qw,qx,qy,qz].
+    keystate_keypose_entry_abs: at.Float[ArrayT, "*b k"] | None = None
 
     @classmethod
     def from_dict(cls, data: at.PyTree[ArrayT]) -> "Observation[ArrayT]":
@@ -134,6 +136,7 @@ class Observation(Generic[ArrayT]):
             keystate_phase=data.get("keystate_phase"),
             keystate_z_hat_zone=data.get("keystate_z_hat_zone"),
             keystate_z_entry_descriptor=data.get("keystate_z_entry_descriptor"),
+            keystate_keypose_entry_abs=data.get("keystate_keypose_entry_abs"),
         )
 
     def to_dict(self) -> at.PyTree[ArrayT]:
@@ -218,6 +221,7 @@ def preprocess_observation(
         keystate_phase=observation.keystate_phase,
         keystate_z_hat_zone=observation.keystate_z_hat_zone,
         keystate_z_entry_descriptor=observation.keystate_z_entry_descriptor,
+        keystate_keypose_entry_abs=observation.keystate_keypose_entry_abs,
     )
 
 

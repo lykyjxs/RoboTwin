@@ -43,7 +43,9 @@ def create_empty_dataset(
     has_effort: bool = False,
     has_keystate: bool = False,
     has_z_entry_descriptor: bool = False,
+    has_keypose_entry_abs: bool = False,
     z_entry_descriptor_dim: int = 64,
+    keypose_entry_abs_dim: int = 7,
     num_phase_classes: int = 3,
     dataset_config: DatasetConfig = DEFAULT_DATASET_CONFIG,
 ) -> LeRobotDataset:
@@ -142,6 +144,12 @@ def create_empty_dataset(
                 "shape": (z_entry_descriptor_dim, ),
                 "names": None,
             }
+        if has_keypose_entry_abs:
+            features["observation.keystate.keypose_entry_abs"] = {
+                "dtype": "float32",
+                "shape": (keypose_entry_abs_dim, ),
+                "names": None,
+            }
 
     if Path(HF_LEROBOT_HOME / repo_id).exists():
         shutil.rmtree(HF_LEROBOT_HOME / repo_id)
@@ -185,11 +193,23 @@ def has_z_entry_descriptor(hdf5_files: list[Path]) -> bool:
         return "/observations/keystate/z_entry_descriptor" in ep
 
 
+def has_keypose_entry_abs(hdf5_files: list[Path]) -> bool:
+    with h5py.File(hdf5_files[0], "r") as ep:
+        return "/observations/keystate/keypose_entry_abs" in ep
+
+
 def get_z_entry_descriptor_dim(hdf5_files: list[Path]) -> int:
     with h5py.File(hdf5_files[0], "r") as ep:
         if "/observations/keystate/z_entry_descriptor" not in ep:
             return 0
         return int(ep["/observations/keystate/z_entry_descriptor"].shape[-1])
+
+
+def get_keypose_entry_abs_dim(hdf5_files: list[Path]) -> int:
+    with h5py.File(hdf5_files[0], "r") as ep:
+        if "/observations/keystate/keypose_entry_abs" not in ep:
+            return 0
+        return int(ep["/observations/keystate/keypose_entry_abs"].shape[-1])
 
 
 def load_raw_images_per_camera(ep: h5py.File, cameras: list[str]) -> dict[str, np.ndarray]:
@@ -250,6 +270,9 @@ def load_raw_episode_data(
             if "/observations/keystate/z_entry_descriptor" in ep:
                 keystate["z_entry_descriptor"] = torch.from_numpy(
                     ep["/observations/keystate/z_entry_descriptor"][:].astype(np.float32))
+            if "/observations/keystate/keypose_entry_abs" in ep:
+                keystate["keypose_entry_abs"] = torch.from_numpy(
+                    ep["/observations/keystate/keypose_entry_abs"][:].astype(np.float32))
 
         imgs_per_cam = load_raw_images_per_camera(
             ep,
@@ -306,6 +329,8 @@ def populate_dataset(
                 frame["observation.keystate.semantic_phase"] = keystate["semantic_phase"][i]
                 if "z_entry_descriptor" in keystate:
                     frame["observation.keystate.z_entry_descriptor"] = keystate["z_entry_descriptor"][i]
+                if "keypose_entry_abs" in keystate:
+                    frame["observation.keystate.keypose_entry_abs"] = keystate["keypose_entry_abs"][i]
             dataset.add_frame(frame)
         dataset.save_episode()
 
@@ -338,6 +363,7 @@ def port_aloha(
             hdf5_files.append(file_path)
 
     z_desc_present = has_z_entry_descriptor(hdf5_files)
+    keypose_present = has_keypose_entry_abs(hdf5_files)
     dataset = create_empty_dataset(
         repo_id,
         robot_type="mobile_aloha" if is_mobile else "aloha",
@@ -346,7 +372,9 @@ def port_aloha(
         has_velocity=has_velocity(hdf5_files),
         has_keystate=has_keystate(hdf5_files),
         has_z_entry_descriptor=z_desc_present,
+        has_keypose_entry_abs=keypose_present,
         z_entry_descriptor_dim=get_z_entry_descriptor_dim(hdf5_files) if z_desc_present else 0,
+        keypose_entry_abs_dim=get_keypose_entry_abs_dim(hdf5_files) if keypose_present else 0,
         dataset_config=dataset_config,
     )
     dataset = populate_dataset(

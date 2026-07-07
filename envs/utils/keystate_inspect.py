@@ -18,6 +18,8 @@ import numpy as np
 
 
 TYPE_NAMES = {0: "none", 1: "pre_grasp", 2: "pre_place"}
+DEFAULT_SEMANTIC_PHASE_NAMES = ["object_in_hand", "lifted", "placed_and_released"]
+DEFAULT_CHECKPOINT_TYPE_NAMES = ["none", "pre_grasp", "pre_place"]
 
 
 def _maybe_json(v, default=None):
@@ -33,6 +35,18 @@ def _maybe_json(v, default=None):
     return v if v is not None else default
 
 
+def _names_from_attr(attrs, key, default, expected_len):
+    names = _maybe_json(attrs.get(key), default)
+    if not isinstance(names, (list, tuple)) or len(names) != expected_len:
+        return list(default)
+    return [str(x) for x in names]
+
+
+def _type_name(d, typ):
+    names = d.get("type_names", DEFAULT_CHECKPOINT_TYPE_NAMES)
+    return names[typ] if 0 <= typ < len(names) else TYPE_NAMES.get(typ, typ)
+
+
 def load_keystate(hdf5_path):
     with h5py.File(hdf5_path, "r") as f:
         if "keystate" not in f:
@@ -44,12 +58,20 @@ def load_keystate(hdf5_path):
             raise KeyError(f"{hdf5_path} /keystate missing v3 fields: {missing}")
         a = dict(ks.attrs)
         sem = ks["semantic_phase"][()]
+        phase_names = _names_from_attr(a, "semantic_phase_names", DEFAULT_SEMANTIC_PHASE_NAMES, sem.shape[1])
+        type_names = _names_from_attr(a, "checkpoint_type_names", DEFAULT_CHECKPOINT_TYPE_NAMES, 3)
+        phase3_name = phase_names[2]
+        phase3 = ks[phase3_name][()] if phase3_name in ks else (
+            ks["placed_and_released"][()] if "placed_and_released" in ks else sem[:, 2])
         d = {
             "next_checkpoint_type": ks["next_checkpoint_type"][()],
             "h_entry": ks["h_entry"][()],
             "object_in_hand": ks["object_in_hand"][()] if "object_in_hand" in ks else sem[:, 0],
             "lifted": ks["lifted"][()] if "lifted" in ks else sem[:, 1],
-            "placed_and_released": ks["placed_and_released"][()] if "placed_and_released" in ks else sem[:, 2],
+            "phase3": phase3,
+            "phase3_name": phase3_name,
+            "phase_names": phase_names,
+            "type_names": type_names,
             "semantic_phase": sem,
             "cycle_id": ks["cycle_id"][()] if "cycle_id" in ks else None,
             "window_id": ks["window_id"][()] if "window_id" in ks else None,
@@ -78,7 +100,7 @@ def _check_common(d, problems):
         "h_entry": len(d["h_entry"]),
         "object_in_hand": len(d["object_in_hand"]),
         "lifted": len(d["lifted"]),
-        "placed_and_released": len(d["placed_and_released"]),
+        d["phase3_name"]: len(d["phase3"]),
         "semantic_phase": len(d["semantic_phase"]),
         "endpose": d["T_endpose"],
     }
@@ -167,14 +189,14 @@ def _check_single_cycle(ep, d, scene_info):
 
     oih = np.nonzero(d["object_in_hand"])[0]
     lif = np.nonzero(d["lifted"])[0]
-    rel = np.nonzero(d["placed_and_released"])[0]
+    rel = np.nonzero(d["phase3"])[0]
     oih_start = int(oih.min()) if oih.size else -1
     lif_start = int(lif.min()) if lif.size else -1
     rel_start = int(rel.min()) if rel.size else -1
     if pg_s >= 0 and oih_start >= 0 and not (pg_s <= oih_start):
         problems.append(f"pre_grasp_window_start({pg_s}) after in-hand start({oih_start})")
     if pp_s >= 0 and rel_start >= 0 and not (pp_s <= rel_start):
-        problems.append(f"pre_place_window_start({pp_s}) after released start({rel_start})")
+        problems.append(f"pre_place_window_start({pp_s}) after {d['phase3_name']} start({rel_start})")
     if oih.size and lif.size:
         overlap = bool((d["object_in_hand"].astype(bool) & d["lifted"].astype(bool)).any())
         if not overlap:
@@ -251,7 +273,7 @@ def _check_stack_bowls(ep, d):
     h = d["h_entry"]
     oih = np.nonzero(d["object_in_hand"])[0]
     lif = np.nonzero(d["lifted"])[0]
-    rel = np.nonzero(d["placed_and_released"])[0]
+    rel = np.nonzero(d["phase3"])[0]
     if oih.size and lif.size and not bool((d["object_in_hand"].astype(bool) & d["lifted"].astype(bool)).any()):
         problems.append("lifted does not overlap object_in_hand")
 
@@ -276,10 +298,71 @@ def _check_stack_bowls(ep, d):
     }
 
 
+def _check_beat_block_hammer(ep, d):
+    a = d["attrs"]
+    problems = []
+    _check_common(d, problems)
+
+    T = int(a.get("T", len(d["next_checkpoint_type"])))
+    pg = _attr_int(a, "pre_grasp_idx")
+    ph = _attr_int(a, "pre_hit_idx")
+    pg_s = _attr_int(a, "pre_grasp_window_start")
+    pg_e = _attr_int(a, "pre_grasp_window_end")
+    ph_s = _attr_int(a, "pre_hit_window_start")
+    ph_e = _attr_int(a, "pre_hit_window_end")
+    flags = _maybe_json(a.get("flags", "[]"), [])
+
+    if pg >= 0 and ph >= 0 and not (pg < ph):
+        problems.append(f"pre_grasp({pg}) >= pre_hit({ph})")
+    if pg_s >= 0 and pg_e >= 0 and not (pg_s <= pg_e):
+        problems.append(f"pre_grasp_window start({pg_s}) > end({pg_e})")
+    if ph_s >= 0 and ph_e >= 0 and not (ph_s <= ph_e):
+        problems.append(f"pre_hit_window start({ph_s}) > end({ph_e})")
+    if pg_e >= 0 and ph_s >= 0 and not (pg_e < ph_s):
+        problems.append(f"pre_grasp_window overlaps pre_hit_window ({pg_e} >= {ph_s})")
+
+    oih = np.nonzero(d["object_in_hand"])[0]
+    lif = np.nonzero(d["lifted"])[0]
+    post = np.nonzero(d["phase3"])[0]
+    oih_start = int(oih.min()) if oih.size else -1
+    lif_start = int(lif.min()) if lif.size else -1
+    post_start = int(post.min()) if post.size else -1
+    if pg_s >= 0 and oih_start >= 0 and not (pg_s <= oih_start):
+        problems.append(f"pre_grasp_window_start({pg_s}) after in-hand start({oih_start})")
+    if ph_s >= 0 and post_start >= 0 and not (ph_s <= post_start):
+        problems.append(f"pre_hit_window_start({ph_s}) after {d['phase3_name']} start({post_start})")
+    if oih.size and lif.size and not bool((d["object_in_hand"].astype(bool) & d["lifted"].astype(bool)).any()):
+        problems.append("lifted does not overlap object_in_hand")
+
+    windows = d["windows"] or [
+        {"name": "pre_grasp", "type": 1, "cycle": 0, "start": pg_s, "end": pg_e},
+        {"name": "pre_hit", "type": 2, "cycle": 0, "start": ph_s, "end": ph_e},
+    ]
+    _check_windows_dense(d, windows, problems)
+
+    return {
+        "ep": ep,
+        "arm": a.get("arm", "?"),
+        "T": T,
+        "pg_s": pg_s,
+        "pg_e": pg_e,
+        "ph_s": ph_s,
+        "ph_e": ph_e,
+        "oih": oih_start,
+        "lif": lif_start,
+        "phase3": post_start,
+        "phase3_name": d["phase3_name"],
+        "flags": flags,
+        "problems": problems,
+    }
+
+
 def check_episode(ep, hdf5_path, scene_info, task):
     d = load_keystate(hdf5_path)
     if task == "stack_bowls_three":
         return _check_stack_bowls(ep, d)
+    if task == "beat_block_hammer":
+        return _check_beat_block_hammer(ep, d)
     return _check_single_cycle(ep, d, scene_info)
 
 
@@ -295,6 +378,13 @@ def _print_stack_row(r):
     status = "OK" if not r["problems"] else "!! " + "; ".join(r["problems"])
     win_text = " ".join(f"c{w.get('cycle')}:{w.get('name')}[{w.get('start')},{w.get('end')}]" for w in r["windows"])
     print(f"{r['ep']:>3} {r['T']:>4} {win_text} z_rise={r['z_note'] or '-'} tail_none={r['tail_none']}  {status}")
+
+
+def _print_hammer_row(r):
+    status = "OK" if not r["problems"] else "!! " + "; ".join(r["problems"])
+    print(f"{r['ep']:>3} {r['arm']:>5} {r['T']:>4} [{r['pg_s']:>3},{r['pg_e']:<3}]      "
+          f"[{r['ph_s']:>3},{r['ph_e']:<3}]      {r['oih']:>8} {r['lif']:>7} {r['phase3']:>8}  "
+          f"{status}")
 
 
 def main():
@@ -321,6 +411,10 @@ def main():
     if args.task == "stack_bowls_three":
         print(f"{'ep':>3} {'T':>4} windows  status")
         print("-" * 140)
+    elif args.task == "beat_block_hammer":
+        print(f"{'ep':>3} {'arm':>5} {'T':>4} {'pg_win':>13} {'hit_win':>13} "
+              f"{'in-hand':>8} {'lifted':>7} {'post_hit':>8}  status")
+        print("-" * 94)
     else:
         print(f"{'ep':>3} {'arm':>5} {'T':>4} {'pg_win':>13} {'pp_win':>13} "
               f"{'in-hand':>8} {'lifted':>7} {'released':>8} {'z_rise':>9}  status")
@@ -337,12 +431,15 @@ def main():
             continue
         if args.task == "stack_bowls_three":
             _print_stack_row(r)
+        elif args.task == "beat_block_hammer":
+            _print_hammer_row(r)
         else:
             _print_single_row(r)
         if r["problems"]:
             bad.append(ep)
 
-    print("-" * (140 if args.task == "stack_bowls_three" else 105))
+    line_len = 140 if args.task == "stack_bowls_three" else (94 if args.task == "beat_block_hammer" else 105)
+    print("-" * line_len)
     print(f"Total {len(eps)} episodes. Clean: {len(eps) - len(bad)}. Problematic: {len(bad)}"
           + (f"  -> {bad}" if bad else "  ✅ all good"))
 
@@ -350,18 +447,19 @@ def main():
         d = load_keystate(os.path.join(data_dir, f"episode{args.episode}.hdf5"))
         print(f"\n=== per-step arrays for episode{args.episode} ===")
         nct, h = d["next_checkpoint_type"], d["h_entry"]
-        oih, lif, rel = d["object_in_hand"], d["lifted"], d["placed_and_released"]
+        oih, lif, rel = d["object_in_hand"], d["lifted"], d["phase3"]
         cyc = d["cycle_id"] if d["cycle_id"] is not None else np.full(len(nct), -1)
         wid = d["window_id"] if d["window_id"] is not None else np.full(len(nct), -1)
+        rel_name = d["phase3_name"]
         for t in range(len(nct)):
             mark = ""
             if nct[t] in (1, 2) and h[t] == 0:
-                mark = f"  <-- {TYPE_NAMES[int(nct[t])].upper()} WINDOW"
+                mark = f"  <-- {_type_name(d, int(nct[t])).upper()} WINDOW"
             elif nct[t] == 0:
                 mark = "  <-- NONE"
             print(f"  t={t:>3}: cycle={int(cyc[t]):>2} window={int(wid[t]):>2} "
-                  f"type={TYPE_NAMES.get(int(nct[t]), int(nct[t]))} h_entry={int(h[t]):>3} "
-                  f"oih={int(oih[t])} lif={int(lif[t])} rel={int(rel[t])}{mark}")
+                  f"type={_type_name(d, int(nct[t]))} h_entry={int(h[t]):>3} "
+                  f"oih={int(oih[t])} lif={int(lif[t])} {rel_name}={int(rel[t])}{mark}")
 
 
 if __name__ == "__main__":

@@ -44,6 +44,7 @@ class beat_block_hammer(Base_Task):
             is_static=True,
         )
         self.hammer.set_mass(0.001)
+        self.record_actors = [("hammer", self.hammer), ("block", self.block)]
 
         self.add_prohibit_area(self.hammer, padding=0.10)
         self.prohibited_area.append([
@@ -60,9 +61,9 @@ class beat_block_hammer(Base_Task):
         arm_tag = ArmTag("left" if block_pose[0] < 0 else "right")
 
         # Grasp the hammer with the selected arm
-        self.move(self.grasp_actor(self.hammer, arm_tag=arm_tag, pre_grasp_dis=0.12, grasp_dis=0.01))
+        self.move(self.grasp_actor(self.hammer, arm_tag=arm_tag, pre_grasp_dis=0.12, grasp_dis=0.01), stage_tag="grasp")
         # Move the hammer upwards
-        self.move(self.move_by_displacement(arm_tag, z=0.07, move_axis="arm"))
+        self.move(self.move_by_displacement(arm_tag, z=0.07, move_axis="arm"), stage_tag="lift")
 
         # Place the hammer on the block's functional point (position 1)
         self.move(
@@ -74,7 +75,9 @@ class beat_block_hammer(Base_Task):
                 pre_dis=0.06,
                 dis=0,
                 is_open=False,
-            ))
+            ),
+            stage_tag="place",
+        )
 
         self.info["info"] = {"{A}": "020_hammer/base0", "{a}": str(arm_tag)}
         return self.info

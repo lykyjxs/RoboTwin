@@ -126,6 +126,7 @@ class Pi0Config(_model.BaseModelConfig):
     use_checkpoint_head: bool = False  # dense next-checkpoint type classification + horizon binning
     use_phase_head: bool = False  # 3-way multi-label semantic phase (BCE)
     use_z_entry_descriptor: bool = False  # Stage 2 bootstrap descriptor auxiliary prediction
+    use_keypose_entry_abs: bool = False  # Stage 2 upcoming checkpoint-entry absolute pose prediction
     use_z_head: bool = False  # reserved for future frozen-Pi0 latent / JEPA-style Stage 2 variant
     use_z_hat_zone: bool = False  # reserved old Stage 2 interface name; not used by descriptor bootstrap
     use_keystate_fusion: bool = False  # inject keystate condition into action expert (Stage 3; default off)
@@ -140,6 +141,7 @@ class Pi0Config(_model.BaseModelConfig):
     num_checkpoint_types: int = 3  # configurable vocab: {0:none, 1:pre_grasp, 2:pre_place, ...}
     num_phase_classes: int = 3  # {object_in_hand, lifted, placed_and_released}
     z_entry_descriptor_dim: int = 64  # deterministic bootstrap descriptor dim (Stage 2 plumbing target)
+    keypose_entry_abs_dim: int = 7  # [x,y,z,qw,qx,qy,qz] world pose of the upcoming window-entry actor
     z_dim: int = 64  # latent dim placeholder for future learned/frozen-Pi0 Stage 2 variants
     z_hat_zone_dim: int = 64  # reserved latent size for future checkpoint-window representation
     z_h_interaction: str = "none"  # reserved: how z_hat_zone and h_entry will interact in Stage 2
@@ -148,6 +150,7 @@ class Pi0Config(_model.BaseModelConfig):
     lambda_h: float = 1.0
     lambda_ph: float = 1.0
     lambda_z_entry_descriptor: float = 0.0
+    lambda_keypose_entry_abs: float = 0.0
     lambda_z: float = 0.0  # reserved for future learned/frozen-Pi0 z target variants
 
     # h_entry bins via upper edges, "h < edge -> that bin" semantics:
@@ -176,10 +179,16 @@ class Pi0Config(_model.BaseModelConfig):
                 "use z_entry_descriptor for the Stage 2 bootstrap descriptor path.")
         if self.z_entry_descriptor_dim <= 0:
             raise ValueError(f"z_entry_descriptor_dim must be positive, got {self.z_entry_descriptor_dim}")
+        if self.keypose_entry_abs_dim <= 0:
+            raise ValueError(f"keypose_entry_abs_dim must be positive, got {self.keypose_entry_abs_dim}")
         if self.use_z_entry_descriptor and self.lambda_z_entry_descriptor <= 0:
             raise ValueError(
                 "use_z_entry_descriptor=True requires lambda_z_entry_descriptor > 0 so the descriptor "
                 "head cannot be silently enabled without training signal.")
+        if self.use_keypose_entry_abs and self.lambda_keypose_entry_abs <= 0:
+            raise ValueError(
+                "use_keypose_entry_abs=True requires lambda_keypose_entry_abs > 0 so the pose head "
+                "cannot be silently enabled without training signal.")
         if self.z_h_interaction != "none":
             raise NotImplementedError(
                 "z_h_interaction is reserved for future z_hat_zone <-> h_entry coupling; keep it 'none'.")
@@ -245,6 +254,9 @@ class Pi0Config(_model.BaseModelConfig):
                 keystate_z_entry_descriptor=jax.ShapeDtypeStruct(
                     [batch_size, self.z_entry_descriptor_dim], jnp.float32)
                 if self.use_z_entry_descriptor or self.use_keystate_fusion else None,
+                keystate_keypose_entry_abs=jax.ShapeDtypeStruct(
+                    [batch_size, self.keypose_entry_abs_dim], jnp.float32)
+                if self.use_keypose_entry_abs else None,
             )
         action_spec = jax.ShapeDtypeStruct([batch_size, self.action_horizon, self.action_dim], jnp.float32)
 
@@ -322,6 +334,8 @@ class Pi0(_model.BaseModel):
         # action-expert hidden, keeping it auxiliary (not fed back into action generation here).
         if config.use_z_entry_descriptor:
             self.ks_z_entry_descriptor_head = nnx.Linear(ae_w, config.z_entry_descriptor_dim, rngs=rngs)
+        if config.use_keypose_entry_abs:
+            self.ks_keypose_entry_abs_head = nnx.Linear(ae_w, config.keypose_entry_abs_dim, rngs=rngs)
         if config.use_z_head:  # Future frozen-Pi0/JEPA target path; hard-gated in Pi0Config.__post_init__.
             self.ks_z_head = nnx.Linear(pg_w, config.z_dim, rngs=rngs)
         if config.use_keystate_fusion:  # Stage 3 late cross-attention: [type, h_entry_bin, phase, z_entry] memory.
@@ -555,12 +569,17 @@ class Pi0(_model.BaseModel):
         """KeyState auxiliary losses. Returns {} for baseline / when labels absent,
         so train.py's `sum(ks_losses.values())` is a no-op and behaviour is unchanged."""
         ks_losses: dict[str, at.Array] = {}
-        need_ks = self._ks.use_checkpoint_head or self._ks.use_phase_head or self._ks.use_z_entry_descriptor
+        need_ks = (
+            self._ks.use_checkpoint_head
+            or self._ks.use_phase_head
+            or self._ks.use_z_entry_descriptor
+            or self._ks.use_keypose_entry_abs
+        )
         if not need_ks:
             return ks_losses
         if obs.keystate_h_entry is None or obs.keystate_type is None:
-            if self._ks.use_z_entry_descriptor:
-                raise ValueError("Stage2 descriptor training requires keystate_type and keystate_h_entry labels.")
+            if self._ks.use_z_entry_descriptor or self._ks.use_keypose_entry_abs:
+                raise ValueError("Stage2 KeyState target training requires keystate_type and keystate_h_entry labels.")
             return ks_losses
 
         # masked-mean pool over the prefix (VLM) tokens -> [b, pg_w]
@@ -616,6 +635,20 @@ class Pi0(_model.BaseModel):
             z_valid = (obs.keystate_type > 0) & h_valid_b & target_nonzero
             ks_losses["loss_z_entry_descriptor"] = self._ks.lambda_z_entry_descriptor * masked_mean(per_sample_z,
                                                                                                       z_valid)
+
+        if self._ks.use_keypose_entry_abs:
+            if obs.keystate_keypose_entry_abs is None:
+                raise ValueError(
+                    "use_keypose_entry_abs=True but Observation.keystate_keypose_entry_abs is missing. "
+                    "Run the Stage0 labeler v5+, process it, and include it in the Stage2 repack transform.")
+            pose_target = jax.lax.stop_gradient(obs.keystate_keypose_entry_abs)
+            pose_pooled = jnp.mean(suffix_out[:, -self.action_horizon:], axis=1)
+            pose_pred = self.ks_keypose_entry_abs_head(pose_pooled)
+            per_sample_pose = jnp.mean(jnp.square(pose_pred - pose_target), axis=-1)
+            target_nonzero = jnp.linalg.norm(pose_target, axis=-1) > 1e-6
+            pose_valid = (obs.keystate_type > 0) & h_valid_b & target_nonzero
+            ks_losses["loss_keypose_entry_abs"] = self._ks.lambda_keypose_entry_abs * masked_mean(
+                per_sample_pose, pose_valid)
 
         return ks_losses
 
