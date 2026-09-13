@@ -11,7 +11,7 @@ Make sure to specify the correct base checkpoint when running this script. For e
 Usage:
     python vla-scripts/merge_lora_weights_and_save.py \
         --base_checkpoint openvla/openvla-7b \
-        --lora_finetuned_checkpoint_dir ./CHECKPOINT/DIR/
+        --lora_finetuned_checkpoint_dir ./checkpoints/model/
 """
 
 import os

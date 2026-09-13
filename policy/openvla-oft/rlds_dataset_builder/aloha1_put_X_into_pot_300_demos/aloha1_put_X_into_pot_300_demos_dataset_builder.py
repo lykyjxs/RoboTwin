@@ -28,7 +28,7 @@ def _generate_examples(paths) -> Iterator[Tuple[str, Any]]:
             low_cam_images = F["/observations/images/cam_low"][()]  # Low third-person camera
 
         # Get language instruction
-        # Assumes filepaths look like: "./ALOHA/PREPROCESSED/DATASETS/<dataset_name>/train/episode_0.hdf5"
+        # Assumes filepaths look like: "./data/aloha_preprocessed/<dataset_name>/train/episode_0.hdf5"
         raw_file_string = episode_path.split('/')[-3]  # E.g., '/scr/moojink/data/aloha1_preprocessed/put_green_pepper_into_pot/train/episode_0.hdf5' -> put_green_pepper_into_pot
         command = " ".join(raw_file_string.split("_"))
 

@@ -81,7 +81,7 @@ This will create processed data in the `processed_data/<task_name>-<task_config>
 conda activate go1
 
 # Optional: Change the LeRobot home directory
-export HF_LEROBOT_HOME=./your/lerobot
+export HF_LEROBOT_HOME=./data/lerobot
 
 bash hdf52lerobot.sh <hdf5_path> <repo_id>
 
@@ -107,7 +107,7 @@ cd ./AgiBot-World
 
 conda activate go1
 
-python evaluate/deploy.py --model_path ./your/checkpoint --data_stats_path ./your/dataset_stats.json --port <SERVER_PORT>
+python evaluate/deploy.py --model_path ./checkpoints/model --data_stats_path ./data/dataset_stats.json --port <SERVER_PORT>
 ```
 
 The server will will listen on port `SERVER_PORT` and wait for observations.

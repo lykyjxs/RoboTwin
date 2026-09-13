@@ -638,4 +638,4 @@ export XLA_PYTHON_CLIENT_PREALLOCATE=false
   - `policy/pi0/wandb/`
   - checkpoints
 - `compute_norm_stats.py` 默认 `num_workers=8` 在当前文件系统上容易卡住；本轮采用单进程等价脚本计算 norm stats。
-- checkpoint 保存到 `./checkpoints/openpi/openpi-assets/checkpoints/keystate` 正常；不要写到 `./checkpoints`。
+- checkpoint 保存到 `./checkpoints/openpi/openpi-assets/checkpoints/keystate` 正常；不要写到 `./.../policy/pi0/checkpoints`。

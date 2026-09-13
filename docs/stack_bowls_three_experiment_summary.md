@@ -83,7 +83,7 @@ Relevant steps evaluated or being evaluated:
 Shared script:
 
 ```text
-./run_stack_bowls_stage3_pred_adaptive_rollout_eval.sh
+./script/run_stack_bowls_stage3_pred_adaptive_rollout_eval.sh
 ```
 
 Repo copy:
@@ -100,7 +100,7 @@ EVAL_CHECKPOINT_ID=10000 \
 EVAL_SEEDS="0 1 2" \
 TEST_NUM=100 \
 EVAL_VIDEO_LOG=0 \
-bash ./run_stack_bowls_stage3_pred_adaptive_rollout_eval.sh
+bash ./script/run_stack_bowls_stage3_pred_adaptive_rollout_eval.sh
 ```
 
 ### 3.2 Ours vs Pi0 paired video evaluation
@@ -108,7 +108,7 @@ bash ./run_stack_bowls_stage3_pred_adaptive_rollout_eval.sh
 Shared script:
 
 ```text
-./run_stack_bowls_stage3_vs_pi0_paired_eval.sh
+./script/run_stack_bowls_stage3_vs_pi0_paired_eval.sh
 ```
 
 Repo copy:
@@ -135,7 +135,7 @@ third_party/RoboTwin/eval_result/stack_bowls_three/pi0/demo_clean_stage3_vs_pi0_
 Main multi-GPU checkpoint sweep:
 
 ```text
-./run_stack_bowls_pi0_ckpt_sweep_8gpu.sh
+./script/run_stack_bowls_pi0_ckpt_sweep_8gpu.sh
 ```
 
 Repo copy:
@@ -154,8 +154,8 @@ fixed pi0_step = 50
 Separate spare scripts:
 
 ```text
-./run_stack_bowls_pi0_ckpt15000_spare_eval.sh
-./run_stack_bowls_pi0_ckpt10000_spare_eval.sh
+./script/run_stack_bowls_pi0_ckpt15000_spare_eval.sh
+./script/run_stack_bowls_pi0_ckpt10000_spare_eval.sh
 ```
 
 These use independent output directories to avoid clobbering other custom tasks.
@@ -165,7 +165,7 @@ These use independent output directories to avoid clobbering other custom tasks.
 Script:
 
 ```text
-./run_stack_bowls_pi0_chunk_sweep_multigpu.sh
+./script/run_stack_bowls_pi0_chunk_sweep_multigpu.sh
 ```
 
 Target:
@@ -331,7 +331,7 @@ ckpt10000 status:
 
 ```text
 No completed result in the checked output directory yet.
-A spare script exists at ./run_stack_bowls_pi0_ckpt10000_spare_eval.sh.
+A spare script exists at ./script/run_stack_bowls_pi0_ckpt10000_spare_eval.sh.
 ```
 
 ckpt15000 spare output directory:
@@ -436,7 +436,7 @@ If it becomes a text file again, delete it and recreate the symlink with `ln -sf
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
 EVAL_SEEDS="0" \
-bash ./run_stack_bowls_pi0_ckpt10000_spare_eval.sh
+bash ./script/run_stack_bowls_pi0_ckpt10000_spare_eval.sh
 ```
 
 for a quick seed0 completion.

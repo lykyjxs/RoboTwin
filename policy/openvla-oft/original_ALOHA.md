@@ -58,7 +58,7 @@ Now begin fine-tuning! Below is a sample command to fine-tune OpenVLA using our 
 ```bash
 torchrun --standalone --nnodes 1 --nproc-per-node X vla-scripts/finetune.py \
   --vla_path openvla/openvla-7b \
-  --data_root_dir ./RLDS/DATASETS/DIR/ \
+  --data_root_dir ./data/rlds/ \
   --dataset_name aloha1_put_X_into_pot_300_demos \
   --run_root_dir /YOUR/CHECKPOINTS/AND/LOG/DIR/ \
   --use_l1_regression True \
@@ -125,7 +125,7 @@ Launch the VLA server on the machine that has the GPU you will use to run model 
 
 ```bash
 python vla-scripts/deploy.py \
-  --pretrained_checkpoint ./FINETUNED/MODEL/CHECKPOINT/DIR/ \
+  --pretrained_checkpoint ./checkpoints/finetuned/ \
   --use_l1_regression True \
   --use_film True \
   --num_images_in_input 3 \

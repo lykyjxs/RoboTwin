@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-WORKSPACE_ROOT="${WORKSPACE_ROOT:-.}"
-ROBOTWIN_ROOT="${ROBOTWIN_ROOT:-${WORKSPACE_ROOT}/third_party/RoboTwin}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROBOTWIN_ROOT="${ROBOTWIN_ROOT:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
+WORKSPACE_ROOT="${WORKSPACE_ROOT:-$(cd "${ROBOTWIN_ROOT}/../.." && pwd)}"
 PI0_ROOT="${PI0_ROOT:-${ROBOTWIN_ROOT}/policy/pi0}"
-SHARE_ROOT="${SHARE_ROOT:-.}"
+SHARE_ROOT="${SHARE_ROOT:-${ROBOTWIN_ROOT}/data}"
 OPENPI_DATA_HOME_DIR="${OPENPI_DATA_HOME_DIR:-${SHARE_ROOT}/checkpoints/openpi}"
 
 VARIANT="${VARIANT:-keypose}"
@@ -23,8 +24,8 @@ LOG_ROOT="${LOG_ROOT:-${OUTPUT_ROOT}/logs}"
 SUMMARY_CSV="${SUMMARY_CSV:-${OUTPUT_ROOT}/summary.csv}"
 MASTER_LOG="${MASTER_LOG:-${LOG_ROOT}/run.log}"
 
-EVAL_PYTHON_BIN="${EVAL_PYTHON_BIN:-python}"
-EVAL_CUROBO_SRC="${EVAL_CUROBO_SRC:-./envs/curobo/src}"
+EVAL_PYTHON_BIN="${EVAL_PYTHON_BIN:-$(command -v python)}"
+EVAL_CUROBO_SRC="${EVAL_CUROBO_SRC:-${ROBOTWIN_ROOT}/envs/curobo/src}"
 EVAL_PYTHONPATH="${ROBOTWIN_ROOT}:${EVAL_CUROBO_SRC}:${PI0_ROOT}/src:${PI0_ROOT}/packages/openpi-client/src:${PYTHONPATH:-}"
 
 export XLA_PYTHON_CLIENT_MEM_FRACTION="${XLA_PYTHON_CLIENT_MEM_FRACTION:-0.4}"

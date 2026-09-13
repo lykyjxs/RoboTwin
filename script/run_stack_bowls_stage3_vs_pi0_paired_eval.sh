@@ -11,16 +11,17 @@ set -euo pipefail
 #   2) Ours fail, Pi0 finetune success
 #
 # Main command:
-#   CUDA_VISIBLE_DEVICES=0 bash ./run_stack_bowls_stage3_vs_pi0_paired_eval.sh
+#   CUDA_VISIBLE_DEVICES=0 bash ./script/run_stack_bowls_stage3_vs_pi0_paired_eval.sh
 #
 # Common overrides:
 #   TEST_NUM=100 START_SEED=100000 INSTRUCTION_SEED=777 CUDA_VISIBLE_DEVICES=0 bash ...
 #   MAKE_COMPARISONS_ONLY=1 bash ...  # reuse the latest existing logs/videos
 
 # ========= Paths =========
-ROBOTWIN_ROOT="${ROBOTWIN_ROOT:-./third_party/RoboTwin}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROBOTWIN_ROOT="${ROBOTWIN_ROOT:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
 PI0_ROOT="${PI0_ROOT:-${ROBOTWIN_ROOT}/policy/pi0}"
-SHARE_ROOT="${SHARE_ROOT:-.}"
+SHARE_ROOT="${SHARE_ROOT:-${ROBOTWIN_ROOT}/data}"
 OPENPI_DATA_HOME_DIR="${OPENPI_DATA_HOME_DIR:-${SHARE_ROOT}/checkpoints/openpi}"
 
 BASELINE_CHECKPOINT_BASE_DIR="${BASELINE_CHECKPOINT_BASE_DIR:-${OPENPI_DATA_HOME_DIR}/openpi-assets/checkpoints/baseline}"
@@ -51,8 +52,8 @@ MAKE_COMPARISONS_ONLY="${MAKE_COMPARISONS_ONLY:-0}"
 MAX_COMPARISON_VIDEOS="${MAX_COMPARISON_VIDEOS:-0}"  # 0 means no cap
 
 # ========= Runtime env =========
-EVAL_PYTHON_BIN="${EVAL_PYTHON_BIN:-python}"
-EVAL_CUROBO_SRC="${EVAL_CUROBO_SRC:-./envs/curobo/src}"
+EVAL_PYTHON_BIN="${EVAL_PYTHON_BIN:-$(command -v python)}"
+EVAL_CUROBO_SRC="${EVAL_CUROBO_SRC:-${ROBOTWIN_ROOT}/envs/curobo/src}"
 export PYTHONWARNINGS=ignore::UserWarning
 export XLA_PYTHON_CLIENT_PREALLOCATE="${XLA_PYTHON_CLIENT_PREALLOCATE:-false}"
 export XLA_PYTHON_CLIENT_MEM_FRACTION="${XLA_PYTHON_CLIENT_MEM_FRACTION:-0.70}"

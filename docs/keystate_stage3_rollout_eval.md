@@ -52,7 +52,7 @@ EVAL_CHECKPOINT_ID=10000 \
 EVAL_SEEDS="0 1 2" \
 TEST_NUM=100 \
 EVAL_VIDEO_LOG=0 \
-bash ./run_stack_bowls_stage3_pred_adaptive_rollout_eval.sh
+bash ./script/run_stack_bowls_stage3_pred_adaptive_rollout_eval.sh
 ```
 
 Equivalent repo copy:

@@ -148,7 +148,7 @@ policy/pi0/.venv/bin/python policy/pi0/scripts/generate_keystate_z_entry_descrip
 If you want to use a specific local checkpoint instead of the config default weight loader, pass:
 
 ```bash
-  --target-params-path ./checkpoint/params \
+  --target-params-path ./checkpoints/example/params \
   --target-missing-regex '.*lora.*'
 ```
 

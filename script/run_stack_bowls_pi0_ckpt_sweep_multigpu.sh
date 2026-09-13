@@ -9,20 +9,21 @@ set -euo pipefail
 #
 # Main command in a 2-GPU custom task:
 #   CUDA_VISIBLE_DEVICES=0,1 \
-#     bash ./run_stack_bowls_pi0_ckpt_sweep_8gpu.sh
+#     bash ./script/run_stack_bowls_pi0_ckpt_sweep_8gpu.sh
 #
 # Main command in an 8-GPU custom task:
 #   CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
-#     bash ./run_stack_bowls_pi0_ckpt_sweep_8gpu.sh
+#     bash ./script/run_stack_bowls_pi0_ckpt_sweep_8gpu.sh
 #
 # Faster seed0-only check:
 #   CUDA_VISIBLE_DEVICES=0,1 EVAL_SEEDS="0" \
-#     bash ./run_stack_bowls_pi0_ckpt_sweep_8gpu.sh
+#     bash ./script/run_stack_bowls_pi0_ckpt_sweep_8gpu.sh
 
 # ========= Paths =========
-ROBOTWIN_ROOT="${ROBOTWIN_ROOT:-./third_party/RoboTwin}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROBOTWIN_ROOT="${ROBOTWIN_ROOT:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
 PI0_ROOT="${PI0_ROOT:-${ROBOTWIN_ROOT}/policy/pi0}"
-SHARE_ROOT="${SHARE_ROOT:-.}"
+SHARE_ROOT="${SHARE_ROOT:-${ROBOTWIN_ROOT}/data}"
 OPENPI_DATA_HOME_DIR="${OPENPI_DATA_HOME_DIR:-${SHARE_ROOT}/checkpoints/openpi}"
 CHECKPOINT_BASE_DIR="${CHECKPOINT_BASE_DIR:-${OPENPI_DATA_HOME_DIR}/openpi-assets/checkpoints/baseline}"
 
@@ -44,8 +45,8 @@ INSTRUCTION_SEED="${INSTRUCTION_SEED:-777}"
 MAX_PARALLEL="${MAX_PARALLEL:-}"
 
 # ========= Runtime env =========
-EVAL_PYTHON_BIN="${EVAL_PYTHON_BIN:-python}"
-EVAL_CUROBO_SRC="${EVAL_CUROBO_SRC:-./envs/curobo/src}"
+EVAL_PYTHON_BIN="${EVAL_PYTHON_BIN:-$(command -v python)}"
+EVAL_CUROBO_SRC="${EVAL_CUROBO_SRC:-${ROBOTWIN_ROOT}/envs/curobo/src}"
 export PYTHONWARNINGS=ignore::UserWarning
 export XLA_PYTHON_CLIENT_PREALLOCATE="${XLA_PYTHON_CLIENT_PREALLOCATE:-false}"
 export XLA_PYTHON_CLIENT_MEM_FRACTION="${XLA_PYTHON_CLIENT_MEM_FRACTION:-0.70}"

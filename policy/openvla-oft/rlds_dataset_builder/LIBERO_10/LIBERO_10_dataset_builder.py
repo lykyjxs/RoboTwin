@@ -163,5 +163,5 @@ class LIBERO10(MultiThreadedDatasetBuilder):
     def _split_paths(self):
         """Define filepaths for data splits."""
         return {
-            "train": glob.glob("./LIBERO/libero/datasets/libero_10_no_noops/*.hdf5"),
+            "train": glob.glob("./data/LIBERO/libero/datasets/libero_10_no_noops/*.hdf5"),
         }

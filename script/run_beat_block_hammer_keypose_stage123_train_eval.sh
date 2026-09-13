@@ -17,9 +17,10 @@ set -euo pipefail
 MODE="${MODE:-train}"
 
 # ========= Paths =========
-ROBOTWIN_ROOT="${ROBOTWIN_ROOT:-./third_party/RoboTwin}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROBOTWIN_ROOT="${ROBOTWIN_ROOT:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
 PI0_ROOT="${PI0_ROOT:-${ROBOTWIN_ROOT}/policy/pi0}"
-SHARE_ROOT="${SHARE_ROOT:-.}"
+SHARE_ROOT="${SHARE_ROOT:-${ROBOTWIN_ROOT}/data}"
 
 LEROBOT_HOME="${LEROBOT_HOME:-${PI0_ROOT}/training_data}"
 HF_HOME_DIR="${HF_HOME_DIR:-${SHARE_ROOT}/cache/huggingface}"
@@ -79,8 +80,8 @@ WAIT_SLEEP_SECONDS="${WAIT_SLEEP_SECONDS:-120}"
 USE_EVAL_LOCK="${USE_EVAL_LOCK:-0}"
 EVAL_LOCK_PATH="${EVAL_LOCK_PATH:-${STAGE3_CKPT_DIR}/eval.lock}"
 
-EVAL_PYTHON_BIN="${EVAL_PYTHON_BIN:-python}"
-EVAL_CUROBO_SRC="${EVAL_CUROBO_SRC:-./envs/curobo/src}"
+EVAL_PYTHON_BIN="${EVAL_PYTHON_BIN:-$(command -v python)}"
+EVAL_CUROBO_SRC="${EVAL_CUROBO_SRC:-${ROBOTWIN_ROOT}/envs/curobo/src}"
 
 # ========= Runtime env =========
 export HF_LEROBOT_HOME="${LEROBOT_HOME}"

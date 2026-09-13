@@ -11,18 +11,19 @@ set -euo pipefail
 #   - Fusion: disabled (KeyState heads still enabled for adaptive chunking), NOT gt/oracle. This is the non-oracle Stage3 path.
 #
 # Entry command:
-#   bash ./run_stack_bowls_stage3_pred_train_test30.sh
+#   bash ./script/run_stack_bowls_stage3_pred_train_test30.sh
 #
 # Common overrides:
-#   CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 bash ./run_stack_bowls_stage3_pred_train_test30.sh
-#   NUM_TRAIN_STEPS=15000 SAVE_INTERVAL=5000 bash ./run_stack_bowls_stage3_pred_train_test30.sh
-#   SKIP_TRAIN=1 bash ./run_stack_bowls_stage3_pred_train_test30.sh
-#   RESUME=1 bash ./run_stack_bowls_stage3_pred_train_test30.sh
+#   CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 bash ./script/run_stack_bowls_stage3_pred_train_test30.sh
+#   NUM_TRAIN_STEPS=15000 SAVE_INTERVAL=5000 bash ./script/run_stack_bowls_stage3_pred_train_test30.sh
+#   SKIP_TRAIN=1 bash ./script/run_stack_bowls_stage3_pred_train_test30.sh
+#   RESUME=1 bash ./script/run_stack_bowls_stage3_pred_train_test30.sh
 
 # ========= Paths =========
-ROBOTWIN_ROOT="${ROBOTWIN_ROOT:-./third_party/RoboTwin}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROBOTWIN_ROOT="${ROBOTWIN_ROOT:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
 PI0_ROOT="${PI0_ROOT:-${ROBOTWIN_ROOT}/policy/pi0}"
-SHARE_ROOT="${SHARE_ROOT:-.}"
+SHARE_ROOT="${SHARE_ROOT:-${ROBOTWIN_ROOT}/data}"
 
 LEROBOT_HOME="${LEROBOT_HOME:-${SHARE_ROOT}/data/lerobot}"
 HF_HOME_DIR="${HF_HOME_DIR:-${SHARE_ROOT}/cache/huggingface}"
@@ -127,8 +128,8 @@ INSTRUCTION_SEED="${INSTRUCTION_SEED:-777}"
 PI0_STEP_FALLBACK="${PI0_STEP_FALLBACK:-50}"
 OUTSIDE_PI0_STEP="${OUTSIDE_PI0_STEP:-50}"
 INSIDE_PI0_STEP="${INSIDE_PI0_STEP:-25}"
-EVAL_PYTHON_BIN="${EVAL_PYTHON_BIN:-python}"
-EVAL_CUROBO_SRC="${EVAL_CUROBO_SRC:-./envs/curobo/src}"
+EVAL_PYTHON_BIN="${EVAL_PYTHON_BIN:-$(command -v python)}"
+EVAL_CUROBO_SRC="${EVAL_CUROBO_SRC:-${ROBOTWIN_ROOT}/envs/curobo/src}"
 
 # ========= Runtime env =========
 export HF_LEROBOT_HOME="${LEROBOT_HOME}"

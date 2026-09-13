@@ -7,14 +7,14 @@ an episode is treated as an atomic unit that entirely goes to either
 the train set or val set.
 
 Original ALOHA data layout:
-    ./DATASET/dataset_name/
+    ./data/aloha_raw/dataset_name/
         - episode_0.hdf5
         - episode_1.hdf5
         - ...
         - episode_N.hdf5
 
 Preprocessed data layout (after running this script):
-    ./PREPROCESSED_DATASETS/dataset_name/
+    ./data/aloha_preprocessed/dataset_name/
         - train/
             - episode_0.hdf5
             - episode_1.hdf5
@@ -236,12 +236,12 @@ if __name__ == "__main__":
     parser.add_argument(
         "--dataset_path",
         required=True,
-        help="Path to raw ALOHA dataset directory. Example: ./USER/data/aloha_raw/put_green_pepper_into_pot/",
+        help="Path to raw ALOHA dataset directory. Example: ./data/aloha_raw/put_green_pepper_into_pot/",
     )
     parser.add_argument(
         "--out_base_dir",
         required=True,
-        help="Path to directory in which to save preprocessed dataset. Example: ./USER/data/aloha_preprocessed/",
+        help="Path to directory in which to save preprocessed dataset. Example: ./data/aloha_preprocessed/",
     )
     parser.add_argument(
         "--percent_val",
